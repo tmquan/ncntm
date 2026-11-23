@@ -2,8 +2,10 @@
 
     python -m pytest tests/test_convert.py        or        python tests/test_convert.py
 
-Every phantom uses the voxel size (dz, dy, dx) = (30, 8, 6) nm: three different numbers,
-so a swapped axis or a swapped voxel size changes the answer and a test fails.
+The box, rod, L, tilted-ellipsoid, oblique-rod and plate phantoms use the voxel size
+(dz, dy, dx) = (30, 8, 6) nm: three different numbers, so a swapped axis or a swapped voxel
+size changes the answer and a test fails.  The sphere and the ellipsoid in the xz plane use
+the SNEMI3D voxel size (30, 6, 6) nm, because their numbers are quoted for that data.
 """
 import sys
 import time
@@ -214,7 +216,8 @@ def test_mesh_is_closed_where_the_instance_touches_the_array_border():
 
 def test_a_wrong_voxel_size_moves_the_mesh():
     mask, grid = box_phantom()
-    # ignoring anisotropy: the same triangles, every vertex squashed by (1, 1, 6/30) ... here g = 6
+    # ignoring anisotropy: the same triangles, every vertex scaled by g / (dx, dy, dz) = (1, 6/8, 6/30)
+    assert np.allclose(grid.space_scale("index"), [1.0, 0.75, 0.2])
     right = C.instance_to_mesh(mask, grid)
     cubes = C.instance_to_mesh(mask, grid.as_cubes())
     assert np.array_equal(right.faces, cubes.faces)
@@ -239,7 +242,7 @@ def test_sphere_mesh_staircase_smoothing_and_simplification():
 
     raw = C.instance_to_mesh(mask, grid)
     assert abs(raw.volume_nm3() / true_volume - 1) < 0.01
-    assert 0.15 < raw.area_nm2() / true_area - 1 < 0.25           # the staircase of 30 nm sections: +21 %
+    assert 0.19 < raw.area_nm2() / true_area - 1 < 0.23           # the staircase of 30 nm sections: +21 %
     assert np.allclose(raw.vertices_xyz_nm.mean(axis=0), centre, atol=1.0)
     same = C.instance_to_mesh(mask, grid, backend="skimage")
     assert np.isclose(same.volume_nm3(), raw.volume_nm3(), rtol=1e-6)
@@ -247,8 +250,11 @@ def test_sphere_mesh_staircase_smoothing_and_simplification():
 
     # a blur of half a section (15 nm, round in physical space) removes the staircase
     smooth = C.instance_to_mesh(mask, grid, smooth_sigma_nm=15.0, backend="skimage")
-    assert abs(smooth.area_nm2() / true_area - 1) < 0.02
+    assert abs(smooth.area_nm2() / true_area - 1) < 0.01          # measured +0.5 %
     assert abs(smooth.volume_nm3() / true_volume - 1) < 0.015
+    # a blur of a tenth of a section (3 nm) is too little: 13 % of the 21 % are still there
+    too_little = C.instance_to_mesh(mask, grid, smooth_sigma_nm=3.0, backend="skimage")
+    assert 0.11 < too_little.area_nm2() / true_area - 1 < 0.15
     assert np.allclose(smooth.vertices_xyz_nm.mean(axis=0), centre, atol=1.0)
     assert (edge_use_counts(smooth.faces) == 2).all()
 
@@ -269,6 +275,14 @@ def test_sphere_mesh_staircase_smoothing_and_simplification():
     explicit = C.instance_to_mesh(mask, grid, simplify_factor=20, max_error_nm=30.0)
     assert np.array_equal(explicit.faces, stepped.faces) and np.array_equal(explicit.vertices_xyz_nm, stepped.vertices_xyz_nm)
     assert np.array_equal(C.instance_to_mesh(mask, grid, simplify_factor=1).faces, raw.faces)       # factor 1 = no simplification
+    # the factor is a lower bound: on a box the flat faces merge at no cost
+    box, box_grid = box_phantom()
+    full = C.instance_to_mesh(box, box_grid)
+    for backend in ("zmesh", "skimage"):
+        halved = C.instance_to_mesh(box, box_grid, simplify_factor=2, backend=backend)
+        assert len(halved.faces) <= len(full.faces) / 2, backend
+        assert abs(halved.volume_nm3() / full.volume_nm3() - 1) < 0.02, backend
+    assert len(C.instance_to_mesh(box, box_grid, simplify_factor=2).faces) < len(full.faces) / 5      # zmesh: 176 of 1156
 
 
 def test_mesh_argument_errors():
@@ -481,6 +495,7 @@ def test_skeleton_errors_are_clear():
     assert raises(TypeError, C.instance_to_skeleton, mask, grid, konst=300)         # misspelt TEASAR parameter
     # the box is 3 x 10 x 20 voxels = 864000 nm^3: skipped as dust by default, skeletonised on request
     assert raises(ValueError, C.instance_to_skeleton, mask, grid)
+    assert C.measure(mask, grid)["cable_length_nm"] > 0                            # measure() has no dust threshold
     assert len(C.instance_to_skeleton(mask, grid, dust_nm3=0.0).vertices_xyz_nm) >= 2
     assert len(C.instance_to_skeleton(mask, grid, dust_nm3=0.0, const=50.0).vertices_xyz_nm) >= 2
 
@@ -709,6 +724,7 @@ def test_kmeans_with_more_parts_than_voxels():
     order = np.argsort(g.means_xyz_nm[:, 0])
     assert np.allclose(g.means_xyz_nm[order], v.means_xyz_nm) and np.allclose(g.covariances_nm2, v.covariances_nm2)
     assert raises(ValueError, C.instance_to_gaussians, mask, grid, k=0)
+    assert raises(ValueError, C.instance_to_gaussians, mask, grid, max_points=0)
 
 
 def test_voxel_gaussian_is_a_small_anisotropic_gaussian():
@@ -750,6 +766,277 @@ def test_wrong_input_fails_loudly_in_every_converter():
         assert raises(ValueError, convert, mask[0], VoxelGrid((1,) + mask.shape[1:], VOXEL_ZYX)), name   # 2D
         assert raises(ValueError, convert, np.zeros_like(mask), grid), name           # empty
         assert raises(TypeError, convert, mask, VOXEL_ZYX), name                      # a tuple is not a grid
+
+
+# ---- cross-checks: one representation against another, or against another library ----------------
+def rotation_xyz(about_x, about_y, about_z):
+    """Rotation matrix Rz Ry Rx (angles in radians)."""
+    cx, sx, cy, sy, cz, sz = (fn(a) for a in (about_x, about_y, about_z) for fn in (np.cos, np.sin))
+    rx = np.array([[1.0, 0.0, 0.0], [0.0, cx, -sx], [0.0, sx, cx]])
+    ry = np.array([[cy, 0.0, sy], [0.0, 1.0, 0.0], [-sy, 0.0, cy]])
+    rz = np.array([[cz, -sz, 0.0], [sz, cz, 0.0], [0.0, 0.0, 1.0]])
+    return rz @ ry @ rx
+
+
+def tilted_ellipsoid_phantom():
+    """A solid ellipsoid (semi-axes 400, 220, 150 nm) turned about all three axes on the
+    (30, 8, 6) nm grid.  Its centre is a voxel CORNER in the middle of the array, so the
+    mask is point symmetric about a point that is not a voxel centre: half a voxel of
+    error, (3, 4, 15) nm, cannot hide.  The covariances xy, xz and yz are all positive.
+    Returns mask, grid, centre (x, y, z) nm, true covariance (nm^2)."""
+    grid = VoxelGrid((50, 150, 170), VOXEL_ZYX)
+    centre = grid.index_to_nm([85, 75, 25])
+    semi = np.array([400.0, 220.0, 150.0])
+    rot = rotation_xyz(0.5, -0.7, 0.9)
+    kji = np.indices(grid.shape_zyx).reshape(3, -1).T
+    along_axes = (grid.voxel_centers_nm(kji) - centre) @ rot
+    mask = (((along_axes / semi) ** 2).sum(axis=1) <= 1.0).reshape(grid.shape_zyx)
+    return mask, grid, centre, rot @ np.diag(semi ** 2 / 5.0) @ rot.T
+
+
+def solid_moments(mesh):
+    """Volume (nm^3), centre of mass (nm) and covariance (nm^2) of the solid enclosed by a
+    closed mesh, summed over the signed tetrahedra (origin, a, b, c) of its triangles."""
+    v, f = mesh.vertices_xyz_nm, mesh.faces
+    a, b, c = v[f[:, 0]], v[f[:, 1]], v[f[:, 2]]
+    six_volumes = np.einsum("ij,ij->i", a, np.cross(b, c))
+    volume = six_volumes.sum() / 6.0
+    s = a + b + c
+    centre = (six_volumes[:, None] * s).sum(axis=0) / (24.0 * volume)
+    # integral of p p^T over a tetrahedron (0, a, b, c) = volume / 20 * (a a^T + b b^T + c c^T + s s^T)
+    second = sum(np.einsum("n,ni,nj->ij", six_volumes, p, p) for p in (a, b, c, s)) / 120.0
+    return volume, centre, second / volume - np.outer(centre, centre)
+
+
+def principal_direction(points):
+    """Unit vector along the largest spread of a point cloud."""
+    return np.linalg.eigh(np.cov((points - points.mean(axis=0)).T))[1][:, -1]
+
+
+def test_solid_moments_helper_on_a_box_written_by_hand():
+    # corner (1, 2, 3), edges (4, 5, 6): 12 outward triangles
+    corners = np.array([[x, y, z] for z in (3.0, 9.0) for y in (2.0, 7.0) for x in (1.0, 5.0)])
+    quads = ([0, 2, 3, 1], [4, 5, 7, 6], [0, 1, 5, 4], [2, 6, 7, 3], [0, 4, 6, 2], [1, 3, 7, 5])
+    faces = np.array([[q[0], q[1], q[2]] for q in quads] + [[q[0], q[2], q[3]] for q in quads], dtype=np.int32)
+    volume, centre, cov = solid_moments(Mesh(corners, faces))
+    assert np.isclose(volume, 4.0 * 5.0 * 6.0)
+    assert np.allclose(centre, [3.0, 4.5, 6.0])
+    assert np.allclose(cov, np.diag([16.0, 25.0, 36.0]) / 12.0)
+
+
+def test_mesh_bricks_and_gaussian_describe_the_same_solid():
+    mask, grid, centre, true_cov = tilted_ellipsoid_phantom()
+    largest = np.linalg.eigvalsh(true_cov).max()
+    assert np.array_equal(centre, [510.0, 600.0, 750.0])
+    assert (true_cov[[0, 0, 1], [1, 2, 2]] > 0.15 * largest).all()                # clearly tilted in xy, xz and yz
+    one = C.single_gaussian(mask, grid)
+    assert np.allclose(one.means_xyz_nm[0], centre, atol=1e-6)                    # point symmetric mask: exact
+    assert np.abs(one.covariances_nm2[0] - true_cov).max() < 0.005 * largest      # measured 0.15 %
+    for surface_only in (False, True):
+        bricks = C.instance_to_bricks(mask, grid, surface_only=surface_only)
+        assert np.allclose(bricks.centers_xyz_nm.mean(axis=0), centre, atol=1e-6), surface_only
+    mixture = C.instance_to_gaussians(mask, grid, k=32)
+    assert np.allclose(total_moments(mixture)[0], centre, atol=1e-6)
+    assert mask[tuple(grid.nm_to_voxel(mixture.means_xyz_nm).T)].all()            # convex solid: every part's mean is inside
+    for backend in ("zmesh", "skimage"):
+        mesh = C.instance_to_mesh(mask, grid, backend=backend)
+        volume, mesh_centre, mesh_cov = solid_moments(mesh)
+        assert np.isclose(volume, mesh.volume_nm3(), rtol=1e-9), backend
+        assert 0.995 < volume / (mask.sum() * DX * DY * DZ) < 1.0, backend        # only the bevels are missing
+        assert np.allclose(mesh_centre, centre, atol=1e-2), (backend, mesh_centre - centre)
+        assert np.abs(mesh_cov - one.covariances_nm2[0]).max() < 0.005 * largest, backend   # measured 0.11 %
+        # a closed surface: the area vectors of its triangles add up to zero
+        v, f = mesh.vertices_xyz_nm, mesh.faces
+        area_vectors = 0.5 * np.cross(v[f[:, 1]] - v[f[:, 0]], v[f[:, 2]] - v[f[:, 0]])
+        assert np.abs(area_vectors.sum(axis=0)).max() < 1e-6 * mesh.area_nm2(), backend
+        # the box around the bricks is the box around the mesh (corner convention in both)
+        everything = C.instance_to_bricks(mask, grid, surface_only=False)
+        assert np.allclose(v.min(axis=0), everything.centers_xyz_nm.min(axis=0) - everything.size_xyz_nm / 2, atol=1e-3)
+        assert np.allclose(v.max(axis=0), everything.centers_xyz_nm.max(axis=0) + everything.size_xyz_nm / 2, atol=1e-3)
+    # mirror the ARRAY along one axis: the two covariances that involve that axis change sign, nothing else
+    for array_axis, column in ((0, 2), (1, 1), (2, 0)):
+        flipped = np.flip(mask, axis=array_axis).copy()
+        sign = np.ones(3)
+        sign[column] = -1.0
+        expected = one.covariances_nm2[0] * np.outer(sign, sign)
+        assert np.allclose(C.single_gaussian(flipped, grid).covariances_nm2[0], expected, rtol=1e-9, atol=1e-6), array_axis
+        assert np.abs(solid_moments(C.instance_to_mesh(flipped, grid))[2] - expected).max() < 0.005 * largest, array_axis
+        assert np.abs(expected - one.covariances_nm2[0]).max() > 0.3 * largest      # the check can tell them apart
+
+
+def test_oblique_rod_skeleton_direction_ends_and_radii():
+    from scipy import ndimage
+
+    # a capsule of radius 90 nm from a to b, oblique to all three axes (it goes down in y)
+    grid = VoxelGrid((40, 120, 150), VOXEL_ZYX)
+    a, b, radius = np.array([150.0, 800.0, 250.0]), np.array([750.0, 200.0, 950.0]), 90.0
+    length = float(np.linalg.norm(b - a))
+    along = (b - a) / length
+    assert length == 1100.0 and along[1] < 0 < along[0] < along[2]
+    centres = grid.voxel_centers_nm(np.indices(grid.shape_zyx).reshape(3, -1).T)
+    t = np.clip((centres - a) @ along, 0.0, length)
+    mask = (np.linalg.norm(centres - (a + t[:, None] * along), axis=1) <= radius).reshape(grid.shape_zyx)
+
+    skeleton = C.instance_to_skeleton(mask, grid)
+    v = skeleton.vertices_xyz_nm
+    assert skeleton.n_end_points() == 2 and skeleton.n_branch_points() == 0
+    direction = principal_direction(v)
+    assert angle_deg(direction, along) < 3.0                       # measured 1.0 degree
+    # the two ends are at the two tips, and each is at the RIGHT tip (no axis is mirrored)
+    ends = v[skeleton.degrees() == 1]
+    low, high = ends[np.argmin(ends @ along)], ends[np.argmax(ends @ along)]
+    assert np.linalg.norm(low - (a - radius * along)) < radius / 2 and np.linalg.norm(high - (b + radius * along)) < radius / 2
+    # every node is near the axis of the capsule (the line through a and b), well away from the wall
+    from_a = v - a
+    assert np.linalg.norm(from_a - (from_a @ along)[:, None] * along, axis=1).max() < 0.75 * radius  # measured 42 nm
+    # radii: exactly the anisotropic distance transform of another library (scipy) at the node's voxel
+    distance = ndimage.distance_transform_edt(mask, sampling=VOXEL_ZYX)             # nm, (z, y, x) spacing
+    assert np.allclose(skeleton.radii_nm, distance[tuple(grid.nm_to_voxel(v).T)], atol=1e-3)
+    assert 0.85 * radius < np.median(skeleton.radii_nm) < radius + DX
+    # cable: the chain of voxel centres zig-zags (+29 %); smoothed over 4 sections it is the tip-to-tip length
+    true_cable = length + 2 * radius
+    assert 1.2 < skeleton.cable_length_nm() / true_cable < 1.4
+    assert abs(C.smooth_skeleton(skeleton, 4 * DZ).cable_length_nm() / true_cable - 1) < 0.05
+
+    # ignoring anisotropy turns the rod: its direction becomes the true one scaled by g / (dx, dy, dz)
+    cubes = C.instance_to_skeleton(mask, grid.as_cubes())
+    predicted = along * grid.space_scale("index")
+    assert angle_deg(principal_direction(cubes.vertices_xyz_nm), predicted) < 5.0   # measured 2.1 degrees
+    assert angle_deg(predicted, along) > 25.0
+    # voxel size in a wrong order: the rod points somewhere else
+    for wrong in ((30.0, 6.0, 8.0), (6.0, 8.0, 30.0)):
+        other = C.instance_to_skeleton(mask, VoxelGrid(grid.shape_zyx, wrong))
+        assert angle_deg(principal_direction(other.vertices_xyz_nm), along) > 8.0, wrong
+
+
+def test_wrong_ways_use_the_index_space_of_the_grid_when_dx_differs_from_dy():
+    mask, grid, _, _ = tilted_ellipsoid_phantom()
+    assert np.allclose(grid.space_scale("index"), [1.0, 6.0 / 8.0, 6.0 / 30.0])    # physical nm -> index-space nm
+    ways = C.gaussians_wrong_ways(mask, grid, k=16, seed=2)
+    correct, scaled = ways["correct"], ways["same_clusters_scaled"]
+    # the covariance mistake alone = the correct covariances as grid.py itself moves them to index space
+    assert np.allclose(scaled.covariances_nm2, grid.covariance_to_space(correct.covariances_nm2, "index"), rtol=1e-9, atol=1e-6)
+    assert np.allclose(scaled.means_xyz_nm, correct.means_xyz_nm, atol=1e-6)
+    # here y is squashed as well (dy = 8 nm, g = 6 nm): variances are (6/8)^2 and (6/30)^2 of the true ones
+    ratio = scaled.covariances_nm2 / correct.covariances_nm2
+    assert np.allclose(ratio[:, 0, 0], 1.0) and np.allclose(ratio[:, 1, 1], 0.5625) and np.allclose(ratio[:, 2, 2], 0.04)
+    # the careless fit, moved to index space with grid.py's own functions, is the fit on grid.as_cubes()
+    careless = C.instance_to_gaussians(mask, grid.as_cubes(), k=16, seed=2)
+    assert np.allclose(grid.to_space(ways["index_fit_scaled"].means_xyz_nm, "index"), careless.means_xyz_nm, atol=1e-6)
+    assert np.array_equal(ways["index_fit_scaled"].covariances_nm2, careless.covariances_nm2)
+    in_index_space = grid.covariance_to_space(ways["index_fit_transformed"].covariances_nm2, "index")
+    assert np.allclose(in_index_space, careless.covariances_nm2, rtol=1e-9, atol=1e-6)
+    # "index space", literally: moments of the voxel indices (voxel size 1) times g = 6 nm, g^2 = 36 nm^2
+    indices = C.single_gaussian(mask, VoxelGrid(grid.shape_zyx, (1.0, 1.0, 1.0)))
+    cubes = C.single_gaussian(mask, grid.as_cubes())
+    assert np.allclose(indices.means_xyz_nm * 6.0, cubes.means_xyz_nm, atol=1e-6)
+    assert np.allclose(indices.covariances_nm2 * 36.0, cubes.covariances_nm2, rtol=1e-9, atol=1e-6)
+
+
+def test_blur_sigma_is_in_nanometres_along_every_axis():
+    # A plate of thickness T blurred with sigma peaks at erf(T / (2 sqrt(2) sigma)).  It keeps a
+    # surface at the level 0.5 only while T > 1.349 sigma -- in nanometres, whatever the voxel size.
+    grid = VoxelGrid((13, 81, 101), VOXEL_ZYX)
+    for axis, n in ((0, 3), (1, 5), (2, 7)):                       # plates 90, 40 and 42 nm thick
+        mask = np.zeros(grid.shape_zyx, dtype=bool)
+        plate = [slice(None)] * 3
+        first = grid.shape_zyx[axis] // 2 - n // 2
+        plate[axis] = slice(first, first + n)
+        mask[tuple(plate)] = True
+        critical_sigma = n * VOXEL_ZYX[axis] / 1.349
+        kept = C.instance_to_mesh(mask, grid, smooth_sigma_nm=0.9 * critical_sigma, backend="skimage")
+        assert raises(ValueError, C.instance_to_mesh, mask, grid, smooth_sigma_nm=1.1 * critical_sigma, backend="skimage"), axis
+        # the surface that is left is centred on the middle plane of the plate
+        middle = (first + n / 2.0) * VOXEL_ZYX[axis]
+        across = kept.vertices_xyz_nm[:, 2 - axis]                 # array axis 0 is z = column 2
+        assert np.isclose(across.mean(), middle, atol=1e-2) and across.min() < middle < across.max(), axis
+        assert across.max() - across.min() < n * VOXEL_ZYX[axis], axis             # thinner than the plate
+
+
+def test_brick_shell_is_what_an_erosion_leaves_also_at_the_array_border():
+    from scipy import ndimage
+
+    whole, _, _, _ = tilted_ellipsoid_phantom()
+    mask = np.ascontiguousarray(whole[20:, 60:, :85])              # the ellipsoid cut by three faces of the array
+    grid = VoxelGrid(mask.shape, VOXEL_ZYX)
+    assert mask[0].any() and mask[:, 0].any() and mask[:, :, -1].any()
+    six_neighbours = ndimage.generate_binary_structure(3, 1)
+    inside = ndimage.binary_erosion(mask, structure=six_neighbours, border_value=0)   # outside the array = outside
+    shell = C.instance_to_bricks(mask, grid)
+    assert np.array_equal(shell.kji, np.argwhere(mask & ~inside))
+    assert shell.n_voxels_total == mask.sum() and 0 < len(shell) < mask.sum()
+    on_cut_face = np.argwhere(mask[:, :, -1])
+    assert {(k, j, mask.shape[2] - 1) for k, j in on_cut_face} <= {tuple(r) for r in shell.kji}
+    assert np.array_equal(grid.nm_to_voxel(shell.centers_xyz_nm), shell.kji)
+
+
+def test_smooth_skeleton_is_the_arc_length_average_computed_the_slow_way():
+    rng = np.random.default_rng(5)
+    n, window = 60, 150.0
+    steps = rng.normal(size=(n - 1, 3)) * [DX, DY, DZ] + [10.0, 0.0, 0.0]
+    p = np.concatenate([np.zeros((1, 3)), np.cumsum(steps, axis=0)])
+    chain = np.stack([np.arange(n - 1), np.arange(1, n)], axis=1).astype(np.int32)
+    smooth = C.smooth_skeleton(Skeleton(p, chain, np.ones(n)), window).vertices_xyz_nm
+    s = np.concatenate([[0.0], np.cumsum(np.linalg.norm(np.diff(p, axis=0), axis=1))])   # arc length at each vertex
+    slow = p.copy()
+    for i in range(1, n - 1):
+        half = min(window / 2.0, s[i], s[-1] - s[i])
+        t = np.linspace(s[i] - half, s[i] + half, 20001)
+        q = np.stack([np.interp(t, s, p[:, axis]) for axis in range(3)], axis=1)       # the polyline at arc length t
+        slow[i] = (0.5 * (q[:-1] + q[1:])).mean(axis=0)
+    assert np.allclose(smooth, slow, atol=1e-4)                    # measured 2e-7 nm
+    assert np.linalg.norm(smooth - p, axis=1).max() > 10.0         # and it did move the vertices
+    # the order in which the vertices are stored does not matter
+    order = rng.permutation(n)
+    position = np.argsort(order)
+    shuffled = C.smooth_skeleton(Skeleton(p[order], position[chain].astype(np.int32), np.ones(n)), window)
+    assert np.allclose(shuffled.vertices_xyz_nm[position], smooth, atol=1e-9)
+
+
+def test_mean_radius_is_taken_along_the_cable_not_over_the_nodes():
+    # Two arms of 300 nm from the origin with the node spacing of 30 x 6 x 6 nm voxels:
+    # along x a node every 6 nm (radius 50 nm), along z a node every 30 nm (radius 10 nm).
+    along_x = np.stack([np.arange(51) * 6.0, np.zeros(51), np.zeros(51)], axis=1)
+    along_z = np.stack([np.zeros(10), np.zeros(10), np.arange(1, 11) * 30.0], axis=1)
+    edges = [[m, m + 1] for m in range(50)] + [[0, 51]] + [[51 + m, 52 + m] for m in range(9)]
+    radii = np.concatenate([np.full(51, 50.0), np.full(10, 10.0)])
+    skeleton = Skeleton(np.concatenate([along_x, along_z]), np.array(edges, dtype=np.int32), radii)
+    assert skeleton.cable_length_nm() == 600.0
+    assert len(along_x) - 1 == 5 * len(along_z)                    # five times more nodes per nanometre along x
+    assert np.isclose(radii.mean(), 43.44, atol=0.01)              # the mean over nodes counts the x arm five times
+    # along the cable: 300 nm at 50 nm, the first z edge (30 nm) at (50 + 10) / 2, 270 nm at 10 nm
+    assert np.isclose(C.mean_radius_nm(skeleton), (300.0 * 50.0 + 30.0 * 30.0 + 270.0 * 10.0) / 600.0)
+    assert np.isclose(C.mean_radius_nm(skeleton), 31.0)
+    # measure() reports the mean along the cable
+    mask, grid = l_phantom()
+    assert C.measure(mask, grid)["mean_radius_nm"] == C.mean_radius_nm(C.instance_to_skeleton(mask, grid))
+
+
+def test_a_cropped_sample_is_put_back_by_its_origin():
+    # the chiral L inside a (30, 8, 6) nm sample, converted from the whole sample and from a crop of it
+    mask, grid = l_phantom(peg=True)
+    sample_whole = S.Sample("toy", Path("toy.h5"), np.zeros(grid.shape_zyx, dtype=np.uint8), mask.astype(np.uint8) * 3,
+                            grid, {}, (0.0, 255.0))
+    crop = sample_whole.crop(slice(2, 12), slice(3, 40), slice(6, 60))
+    origin = crop.origin_xyz_nm
+    assert np.array_equal(origin, [6 * DX, 3 * DY, 2 * DZ]) and np.array_equal(origin, [36.0, 24.0, 60.0])
+    assert crop.grid.voxel_size_zyx_nm == VOXEL_ZYX and crop.grid.shape_zyx == (10, 37, 54)
+    whole_mask, crop_mask = sample_whole.mask(3), crop.mask(3)
+    assert np.array_equal(whole_mask, mask) and crop_mask.sum() == mask.sum()
+
+    mesh, mesh_crop = C.instance_to_mesh(whole_mask, grid), C.instance_to_mesh(crop_mask, crop.grid)
+    assert np.array_equal(mesh.faces, mesh_crop.faces)
+    assert np.allclose(mesh_crop.vertices_xyz_nm + origin, mesh.vertices_xyz_nm, atol=1e-3)
+    bricks, bricks_crop = C.instance_to_bricks(whole_mask, grid), C.instance_to_bricks(crop_mask, crop.grid)
+    assert np.allclose(bricks_crop.centers_xyz_nm + origin, bricks.centers_xyz_nm, atol=1e-9)
+    assert np.array_equal(bricks_crop.kji + [2, 3, 6], bricks.kji)
+    skeleton, skeleton_crop = (C.instance_to_skeleton(whole_mask, grid, dust_nm3=0.0),
+                               C.instance_to_skeleton(crop_mask, crop.grid, dust_nm3=0.0))
+    assert np.allclose(skeleton_crop.vertices_xyz_nm + origin, skeleton.vertices_xyz_nm, atol=1e-3)
+    assert np.array_equal(skeleton_crop.radii_nm, skeleton.radii_nm)
+    one, one_crop = C.single_gaussian(whole_mask, grid), C.single_gaussian(crop_mask, crop.grid)
+    assert np.allclose(one_crop.means_xyz_nm + origin, one.means_xyz_nm, atol=1e-9)
+    assert np.allclose(one_crop.covariances_nm2, one.covariances_nm2, rtol=1e-9, atol=1e-6)
 
 
 # ---- the anisotropy exhibit ------------------------------------------------------------------------
@@ -794,6 +1081,21 @@ def test_measure_and_compare_on_a_rod_across_the_sections():
                               "correct_percent_of_ref", "as_cubes_percent_of_ref"}
             assert r["reference"] == r["correct"] and r["correct_percent_of_ref"] == 0.0
             assert r["as_cubes_percent_of_ref"] == r["as_cubes_percent"]
+
+
+def test_compare_measures_an_object_that_ignoring_anisotropy_would_call_dust():
+    # 16 x 10 x 12 voxels of 30 x 6 x 6 nm: 2.07e6 nm^3 in truth, 4.15e5 nm^3 as cubes of 6 nm.
+    # The default dust volume of instance_to_skeleton (1e6 nm^3) lies between the two.
+    grid = VoxelGrid((20, 40, 60), (30.0, 6.0, 6.0))
+    mask = np.zeros(grid.shape_zyx, dtype=bool)
+    mask[2:18, 15:25, 10:22] = True
+    assert mask.sum() * 1080.0 == 2073600.0 and mask.sum() * 216.0 == 414720.0
+    assert len(C.instance_to_skeleton(mask, grid).vertices_xyz_nm) >= 2
+    assert raises(ValueError, C.instance_to_skeleton, mask, grid.as_cubes())       # "dust", by the wrong volume
+    rows = {r["quantity"]: r for r in C.compare_anisotropy(mask, grid)}             # both columns are measured
+    assert rows["volume_nm3"]["correct"] == 2073600.0 and rows["volume_nm3"]["as_cubes"] == 414720.0
+    assert np.isclose(rows["volume_nm3"]["as_cubes_percent"], -80.0)
+    assert 0 < rows["cable_length_nm"]["as_cubes"] < 0.5 * rows["cable_length_nm"]["correct"]   # measured 135 and 463 nm
 
 
 def test_compare_on_an_isotropic_grid_shows_no_change():
@@ -896,6 +1198,16 @@ def test_fib25_strided_by_4_against_its_isotropic_original():
     assert -55.0 < rows["mesh_area_nm2"]["as_cubes_percent_of_ref"] < -35.0
     assert rows["mean_radius_nm"]["as_cubes_percent_of_ref"] < -40.0
     assert rows["cable_length_smooth_nm"]["as_cubes"] < rows["cable_length_smooth_nm"]["correct"]
+
+    # where a strided object is drawn: the kept plane stands for its whole slab, so this neurite
+    # (which does not reach the z faces) sits (4 / 2 - phase - 1 / 2) * 8 nm further along z
+    everything = f.mask(i, largest_component=False)
+    assert not everything[0].any() and not everything[-1].any()
+    z_original = C.single_gaussian(everything, f.grid).means_xyz_nm[0, 2]
+    for phase in range(4):
+        shifted = f.strided(4, phase=phase)
+        z_strided = C.single_gaussian(shifted.mask(i, largest_component=False), shifted.grid).means_xyz_nm[0, 2]
+        assert abs((z_strided - z_original) - (1.5 - phase) * 8.0) < 1.0, (phase, z_strided - z_original)
 
 
 def run_as_script(namespace) -> int:

@@ -224,3 +224,6 @@ __marimo__/
 
 # Local EM datasets
 data/
+
+# Kit files
+*.kit

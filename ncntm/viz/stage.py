@@ -62,6 +62,9 @@ SH_C0 = 0.28209479177387814          # 1 / (2 sqrt(pi)): degree-0 spherical harm
 K_SIGMA = math.sqrt(5.0)             # semi-axes of the solid ellipsoid with the same covariance
 SPLAT_TYPE = "ParticleField3DGaussianSplat"
 LABEL_ZERO_GREY = 0.06               # display grey of label 0 (background) in instance slices
+# exposure of an authored camera: these five values multiply the picture by exactly 1
+CAMERA_EXPOSURE = {"exposure": 0.0, "exposure:fStop": 1.0, "exposure:iso": 100.0,
+                   "exposure:responsivity": 1.0, "exposure:time": 1.0}
 
 _DOUBLE = UsdGeom.XformOp.PrecisionDouble     # UsdGeom's default precision for scale is FLOAT
 _T = Sdf.ValueTypeNames
@@ -265,14 +268,14 @@ def save_stage(stage: Usd.Stage, path=None) -> str:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     if not root.Export(path):
         raise IOError(f"could not write {path}")
-    if root.realPath:
-        src_dir, dst_dir = os.path.dirname(root.realPath), os.path.dirname(path)
-        for prim in stage.Traverse():
+    source_dir, target_dir = os.path.dirname(root.realPath), os.path.dirname(path)
+    if root.realPath and source_dir != target_dir:
+        for prim in stage.Traverse():                        # texture readers: UsdUVTexture inputs:file
             file_attr = prim.GetAttribute("inputs:file")
             asset = file_attr.Get() if file_attr else None
-            if asset and not os.path.isabs(asset.path) and src_dir != dst_dir:
-                os.makedirs(os.path.dirname(os.path.join(dst_dir, asset.path)), exist_ok=True)
-                shutil.copyfile(os.path.join(src_dir, asset.path), os.path.join(dst_dir, asset.path))
+            if asset and not os.path.isabs(asset.path):
+                os.makedirs(os.path.dirname(os.path.join(target_dir, asset.path)), exist_ok=True)
+                shutil.copyfile(os.path.join(source_dir, asset.path), os.path.join(target_dir, asset.path))
     return path
 
 
@@ -313,7 +316,10 @@ def author_camera(stage: Usd.Stage, name: str = "overview", *, eye, target, up=(
     metre-sized scenes and would cut a micrometre-sized one away.
 
     A USD camera looks down its local -Z with +Y up, and its apertures are in tenths of a
-    stage unit."""
+    stage unit.  The five exposure attributes are authored with the values that give an
+    exposure scale of exactly 1 (exposure 0, f-stop 1, ISO 100, responsivity 1, time 1): RTX
+    has other defaults for some of them, and the slices are emissive, so their brightness
+    would depend on which default applies."""
     if projection not in ("perspective", "orthographic"):
         raise ValueError(f"projection must be 'perspective' or 'orthographic', got {projection!r}")
     eye, target = np.asarray(eye, dtype=np.float64), np.asarray(target, dtype=np.float64)
@@ -347,6 +353,8 @@ def author_camera(stage: Usd.Stage, name: str = "overview", *, eye, target, up=(
     camera.CreateVerticalApertureAttr(vertical)
     camera.CreateHorizontalApertureAttr(vertical * float(aspect))
     camera.CreateClippingRangeAttr(Gf.Vec2f(0.01 * distance, 100.0 * distance))
+    for key, value in CAMERA_EXPOSURE.items():       # schema attributes of UsdGeom.Camera (custom = False)
+        camera.GetPrim().CreateAttribute(key, _T.Float, False).Set(value)
     return camera
 
 
@@ -357,17 +365,19 @@ def tube_width_factor(grid: VoxelGrid, space: str, p0_xyz_nm, p1_xyz_nm) -> np.n
 
     A tube radius is a physical length and has no meaning in index space.  The picture there
     is the image of the true scene under A = diag(grid.space_scale(space)), and A turns a
-    round cross-section into an ellipse.  A tube can only be round, so it gets the radius of
-    the circle with the AREA of that ellipse: areas in the plane perpendicular to the unit
-    tangent t scale by det(A) |A^-1 t|, the factor is the square root of that.
+    round tube into a tube with an elliptical cross-section.  A drawn tube can only be round,
+    so it gets the radius that keeps the VOLUME of that image: A multiplies volumes by
+    det(A) and the length of an edge with unit tangent t by |A t|, so the area of the
+    cross-section (perpendicular to the new axis) changes by det(A) / |A t|, and the width
+    by the square root of that.
     For SNEMI3D (z shrinks 5 times): a tube along z keeps its width, a tube along x or y
-    becomes sqrt(1/5) = 0.447 times as wide."""
+    becomes sqrt(1/5) = 0.447 times as wide, a tube at 45 degrees between x and z 0.527 times."""
     a = grid.space_scale(space)
     t = np.asarray(p1_xyz_nm, dtype=np.float64) - np.asarray(p0_xyz_nm, dtype=np.float64)
-    length = np.linalg.norm(t, axis=-1, keepdims=True)
-    t = np.divide(t, length, out=np.zeros_like(t), where=length > 0)
-    factor = np.sqrt(np.prod(a) * np.linalg.norm(t / a, axis=-1))
-    return np.where(length[..., 0] > 0, factor, np.prod(a) ** (1.0 / 3.0))     # zero-length edge
+    length = np.linalg.norm(t, axis=-1)
+    image_length = np.linalg.norm(t * a, axis=-1)                 # the edge as drawn in `space`
+    stretch = np.divide(image_length, length, out=np.ones_like(length), where=length > 0)      # |A t|
+    return np.where(length > 0, np.sqrt(np.prod(a) / stretch), np.prod(a) ** (1.0 / 3.0))      # zero-length edge
 
 
 def nice_length_nm(extent_nm: float, fraction: float = 0.25) -> float:
@@ -381,6 +391,7 @@ def nice_length_nm(extent_nm: float, fraction: float = 0.25) -> float:
 
 
 def format_length(nm: float) -> str:
+    """A length in nm as a label: "500 nm" below one micrometre, "2 um" from there on."""
     return f"{nm / 1000.0:g} um" if nm >= 1000.0 else f"{nm:g} nm"
 
 
@@ -425,11 +436,10 @@ class Dataset:
         self.name = Tf.MakeValidIdentifier(name)
         self.volumes = {"raw": raw, "instance": instance}
         self.norm_window = (float(norm_window[0]), float(norm_window[1]))
-        if stage.GetPrimAtPath("/World") and not stage.GetRootLayer().customLayerData.get("emScale"):
-            raise ValueError("this stage was not made by new_stage(): call configure_stage(stage) first")
-        if not stage.GetPrimAtPath("/World"):
-            configure_stage(stage)
-        self._remove(Sdf.Path(f"/World/{self.name}"))
+        if not stage.GetRootLayer().customLayerData.get("emScale"):
+            raise ValueError("this stage does not have the metadata of this package: make it with "
+                             "new_stage(path), or call configure_stage(stage) first")
+        stage.RemovePrim(f"/World/{self.name}")                # a re-run cell starts the dataset afresh
 
         d = grid.voxel_size_xyz_nm
         root = UsdGeom.Xform.Define(stage, f"/World/{self.name}")
@@ -538,15 +548,11 @@ class Dataset:
                 attr.Set(value_in_space(space))
 
     def _remove(self, path: Sdf.Path) -> None:
-        """Remove a prim together with what the two variants say about it."""
+        """Remove a prim of this dataset together with what the two variants say about it."""
         self.stage.RemovePrim(path)
-        prim = self.stage.GetPrimAtPath(f"/World/{self.name}")
-        if prim and prim.GetVariantSets().HasVariantSet(SPACE_VARIANT_SET):
-            for space in SPACES:
-                target = Usd.EditTarget.ForLocalDirectVariant(
-                    self.stage.GetRootLayer(), prim.GetPath().AppendVariantSelection(SPACE_VARIANT_SET, space))
-                with Usd.EditContext(self.stage, target):
-                    self.stage.RemovePrim(path)
+        for space in SPACES:
+            with Usd.EditContext(self.stage, self._variant_target(space)):
+                self.stage.RemovePrim(path)
 
     # ---- layers ----------------------------------------------------------------------------------
     def _new_prim_path(self, layer: str, frame: Usd.Prim, name: str) -> Sdf.Path:
@@ -630,16 +636,20 @@ class Dataset:
                       margin: float = 1.05, projection: str = "perspective", aspect: float = 4.0 / 3.0) -> UsdGeom.Camera:
         """A camera that frames the PHYSICAL box of the dataset: it looks at the centre of the
         box from ``direction`` (centre -> eye) so that the bounding sphere of the box, times
-        ``margin``, just fills the picture height.  The camera does not move when the space is
-        switched, so index-space and physical-space pictures can be compared.
-        Same rule as ``emray.Camera.fit``."""
+        ``margin``, just touches the shorter side of the picture.  The camera does not move when
+        the space is switched, so index-space and physical-space pictures can be compared.
+        The same rule as ``emray.Camera.fit``."""
         offset = np.array(self.prim.GetAttribute("xformOp:translate").Get(), dtype=np.float64)
         extent = self.grid.extent_xyz_nm / NM_PER_UNIT
         centre, radius = offset + 0.5 * extent, 0.5 * float(np.linalg.norm(extent)) * margin
         d = np.asarray(direction, dtype=np.float64) / np.linalg.norm(direction)
-        distance = radius / math.sin(math.radians(fov) / 2.0) if projection == "perspective" else 4.0 * radius
+        narrow = min(1.0, float(aspect))                 # < 1: the picture is narrower than high
+        if projection == "perspective":
+            distance = radius / math.sin(math.atan(narrow * math.tan(math.radians(fov) / 2.0)))
+        else:
+            distance = 4.0 * radius
         return author_camera(self.stage, name, eye=centre + d * distance, target=centre, projection=projection,
-                             fov=fov, ortho_height=2.0 * radius, aspect=aspect)
+                             fov=fov, ortho_height=2.0 * radius / narrow, aspect=aspect)
 
     # ---- materials ---------------------------------------------------------------------------------
     def _material(self, name: str, *, color=None, opacity: float = 1.0, unlit: bool = False,
@@ -727,20 +737,12 @@ class Dataset:
 
         The quad spans [0, n] index units and needs no voxel size: the voxels frame supplies it.
         Texture rows: USD puts st (0, 0) at the lower-left of the image and PNG row 0 is the top
-        row, so the corner at array row 0 gets t = 1."""
+        row, so the corner at array row 0 gets t = 1.  Slices of two kinds at the same index
+        lie in the same plane: show one of them at a time (``set_visible``)."""
         if kind not in SLICE_KINDS:
             raise ValueError(f"kind must be one of {tuple(SLICE_KINDS)}, got {kind!r}")
         dataset, colormap = SLICE_KINDS[kind]
-        volume = self.volumes[dataset] if volume is None else volume
-        if volume is None:
-            raise ValueError(f"no /{dataset} array for {kind!r} slices: this dataset has none, pass volume=")
-        volume = np.asarray(volume)
-        if tuple(volume.shape) != self.grid.shape_zyx:
-            raise ValueError(f"volume has shape {volume.shape} but the grid says {self.grid.shape_zyx} (z, y, x)")
-        if dataset == "raw" and volume.dtype != np.uint8:
-            raise ValueError(f"{kind} slices show the stored uint8 numbers, got dtype {volume.dtype}")
-        if dataset == "instance" and not np.issubdtype(volume.dtype, np.integer):
-            raise ValueError(f"instance slices need integer labels, got dtype {volume.dtype}")
+        volume = self._slice_volume(kind, dataset, volume)
         if int(upsample) < 1:
             raise ValueError("upsample must be a positive integer")
         nx, ny, nz = (int(n) for n in self.grid.shape_xyz)
@@ -764,16 +766,7 @@ class Dataset:
                 image, corners = volume[:, index, :], [(0, c, 0), (nx, c, 0), (nx, c, nz), (0, c, nz)]
             else:                # image = volume[:, :, i]  rows = z, columns = y
                 image, corners = volume[:, :, index], [(c, 0, 0), (c, ny, 0), (c, ny, nz), (c, 0, nz)]
-            mesh = UsdGeom.Mesh.Define(self.stage, self._new_prim_path(kind, self.voxels, f"slice_{axis}{index:04d}"))
-            mesh.CreatePointsAttr(_vec3f(corners))
-            mesh.CreateFaceVertexCountsAttr([4])
-            mesh.CreateFaceVertexIndicesAttr([0, 1, 2, 3])
-            mesh.CreateSubdivisionSchemeAttr(UsdGeom.Tokens.none)       # no normals authored
-            mesh.CreateDoubleSidedAttr(True)
-            mesh.CreateExtentAttr(_extent(corners))
-            st = UsdGeom.PrimvarsAPI(mesh).CreatePrimvar("st", _T.TexCoord2fArray, UsdGeom.Tokens.vertex)
-            st.Set(Vt.Vec2fArray([Gf.Vec2f(0, 1), Gf.Vec2f(1, 1), Gf.Vec2f(1, 0), Gf.Vec2f(0, 0)]))
-            prim = mesh.GetPrim()
+            prim = self._add_textured_quad(self._new_prim_path(kind, self.voxels, f"slice_{axis}{index:04d}"), corners)
             for key, type_name, value in (
                 ("em:kind", _T.Token, "slice"),
                 ("em:slice:kind", _T.Token, kind),
@@ -793,6 +786,35 @@ class Dataset:
                 UsdShade.MaterialBindingAPI.Apply(prim).Bind(material)
             prims.append(prim)
         return prims
+
+    def _slice_volume(self, kind: str, dataset: str, volume) -> np.ndarray:
+        """The (z, y, x) array a slice of ``kind`` shows: ``volume`` or the dataset's own, checked."""
+        volume = self.volumes[dataset] if volume is None else volume
+        if volume is None:
+            raise ValueError(f"no /{dataset} array for {kind!r} slices: this dataset has none, pass volume=")
+        volume = np.asarray(volume)
+        if tuple(volume.shape) != self.grid.shape_zyx:
+            raise ValueError(f"volume has shape {volume.shape} but the grid says {self.grid.shape_zyx} (z, y, x)")
+        if dataset == "raw" and volume.dtype != np.uint8:
+            raise ValueError(f"{kind} slices show the stored uint8 numbers, got dtype {volume.dtype}")
+        if dataset == "instance" and not np.issubdtype(volume.dtype, np.integer):
+            raise ValueError(f"instance slices need integer labels, got dtype {volume.dtype}")
+        return volume
+
+    def _add_textured_quad(self, path: Sdf.Path, corners) -> Usd.Prim:
+        """A quad Mesh whose four points are ``corners``, in order around it.  Texture
+        coordinates: point 0 is the image's top-left corner (s, t) = (0, 1), point 1 its
+        top-right, point 2 its bottom-right, point 3 its bottom-left."""
+        mesh = UsdGeom.Mesh.Define(self.stage, path)
+        mesh.CreatePointsAttr(_vec3f(corners))
+        mesh.CreateFaceVertexCountsAttr([4])
+        mesh.CreateFaceVertexIndicesAttr([0, 1, 2, 3])
+        mesh.CreateSubdivisionSchemeAttr(UsdGeom.Tokens.none)       # no normals authored
+        mesh.CreateDoubleSidedAttr(True)
+        mesh.CreateExtentAttr(_extent(corners))
+        st = UsdGeom.PrimvarsAPI(mesh).CreatePrimvar("st", _T.TexCoord2fArray, UsdGeom.Tokens.vertex)
+        st.Set(Vt.Vec2fArray([Gf.Vec2f(0, 1), Gf.Vec2f(1, 1), Gf.Vec2f(1, 0), Gf.Vec2f(0, 0)]))
+        return mesh.GetPrim()
 
     # ---- instance: bricks and surface ------------------------------------------------------------
     def _instance_color(self, color, instance_id):
@@ -888,7 +910,7 @@ class Dataset:
         self._author(curves.CreateWidthsAttr(), lambda space: _floats(widths(space)))
         curves.SetWidthsInterpolation(UsdGeom.Tokens.vertex)             # one width per point
         self._author(curves.CreateExtentAttr(), lambda space: _extent(points(space), pad=0.5 * widths(space).max()))
-        self._paint(curves, color, unlit=(layer == "frame"))
+        self._paint(curves, color)
         curves.GetPrim().CreateAttribute("em:kind", _T.Token).Set(kind)
         return curves
 
@@ -912,14 +934,14 @@ class Dataset:
         return prim
 
     def add_skeleton(self, skeleton, color=(0.12, 0.12, 0.12), branch_color=(0.90, 0.10, 0.10),
-                     end_color=(0.10, 0.35, 0.95), name: str = None) -> tuple:
+                     end_color=(0.10, 0.35, 0.95), marker_scale: float = 1.25, name: str = None) -> tuple:
         """skeleton: tubes and node markers in the PHYSICAL frame.  Returns (tubes, nodes).
 
         tubes   linear BasisCurves, one 2-point curve per edge; the width at a node is
                 2 x its radius (``skeleton.radii_nm``, the distance to the nearest boundary)
         nodes   a PointInstancer of unit spheres, one per node, scaled to the node radius;
-                branch points (degree > 2) and end points (degree 1) are 1.5 times larger and
-                have their own colours
+                branch points (more than two edges) and end points (one edge) are
+                ``marker_scale`` times larger and have their own colours
 
         In index space the node positions become A p, the node spheres become the ellipsoids
         A maps them to (scale = radius * A), and the tube widths follow ``tube_width_factor``."""
@@ -931,13 +953,15 @@ class Dataset:
         if edges.min() < 0 or edges.max() >= len(vertices):
             raise ValueError("skeleton.edges refers to nodes that do not exist")
         color, branch_color, end_color = _rgb(color), _rgb(branch_color), _rgb(end_color)
+        if not marker_scale > 0:
+            raise ValueError("marker_scale must be positive")
         tag = name or str(int(skeleton.instance_id))
         tubes = self._add_tubes("skeleton", f"tubes_{tag}", vertices, edges, radii, color, "tubes").GetPrim()
         tubes.CreateAttribute("em:instanceId", _T.Int).Set(int(skeleton.instance_id))
 
         degree = np.bincount(edges.ravel(), minlength=len(vertices))
         proto_index = np.where(degree > 2, 1, np.where(degree == 1, 2, 0))        # 0 ordinary, 1 branch, 2 end
-        marker_radii = radii * np.where(proto_index > 0, 1.5, 1.0)
+        marker_radii = radii * np.where(proto_index > 0, float(marker_scale), 1.0)
         nodes = UsdGeom.PointInstancer.Define(self.stage, self._new_prim_path("skeleton", self.physical, f"nodes_{tag}"))
         targets = []
         for proto_name, proto_color in (("node", color), ("branch_point", branch_color), ("end_point", end_color)):
@@ -988,26 +1012,11 @@ class Dataset:
         splats   None = use the schema if this USD has it, False = take the fallback path
         show     which of the two prims is visible: "splats", "ellipsoids", "both", or "auto"
                  (splats if the schema prim was authored, else ellipsoids)"""
-        means = _checked("gaussians.means_xyz_nm", gaussians.means_xyz_nm, (3,))
-        covs = _checked("gaussians.covariances_nm2", gaussians.covariances_nm2, (3, 3))
-        if len(covs) != len(means):
-            raise ValueError(f"{len(means)} means but {len(covs)} covariances")
-        if not np.allclose(covs, np.swapaxes(covs, 1, 2), rtol=1e-6, atol=1e-9 * np.abs(covs).max()):
-            raise ValueError("gaussians.covariances_nm2 must be symmetric")
-        if np.linalg.eigvalsh(covs).min() <= 0:
-            raise ValueError("gaussians.covariances_nm2 must be positive definite")
+        means, covs, opacities, colors = self._gaussian_arrays(gaussians, opacity, color)
         if show not in ("auto", "splats", "ellipsoids", "both"):
             raise ValueError(f"show must be 'auto', 'splats', 'ellipsoids' or 'both', got {show!r}")
         if not k_sigma > 0:
             raise ValueError("k_sigma must be positive")
-        opacities = np.broadcast_to(np.asarray(opacity, dtype=np.float64), (len(means),))
-        if not np.isfinite(opacities).all() or opacities.min() < 0 or opacities.max() > 1:
-            raise ValueError("opacity must be in [0, 1]")
-        if color is None:
-            color = self._instance_color(None, gaussians.instance_id) if gaussians.colors_rgb is None else gaussians.colors_rgb
-        colors = np.broadcast_to(np.asarray(color, dtype=np.float64), (len(means), 3))
-        if not np.isfinite(colors).all() or colors.min() < 0 or colors.max() > 1:
-            raise ValueError("gaussian colours must be in [0, 1]")
         use_schema = splat_schema_available() if splats is None else bool(splats)
         if use_schema and not splat_schema_available():
             raise RuntimeError(f"this USD build has no {SPLAT_TYPE} schema: call add_gaussians(..., splats=False)")
@@ -1016,13 +1025,14 @@ class Dataset:
         cache = {}
 
         def in_space(space):
-            """(means, covariances, quaternions (w, x, y, z), standard deviations) as drawn in
-            ``space``, in nm: mean A mu and covariance A S A^T, decomposed into principal axes."""
+            """(means, covariances, quaternions (w, x, y, z), standard deviations, rotations) as
+            drawn in ``space``, in nm: mean A mu and covariance A S A^T, decomposed into
+            principal axes (covariance = R diag(sigma^2) R^T, axes in the columns of R)."""
             if space not in cache:
                 mu = self.grid.to_space(means, space)
                 cov = self.grid.covariance_to_space(covs, space)
                 rotations, sigmas = Gaussians(mu, cov, gaussians.weights).principal_axes()
-                cache[space] = (mu, cov, rotation_to_quaternion_wxyz(rotations), sigmas)
+                cache[space] = (mu, cov, rotation_to_quaternion_wxyz(rotations), sigmas, rotations)
             return cache[space]
 
         prim = self.stage.DefinePrim(self._new_prim_path("gaussian", self.physical, f"splats_{tag}"),
@@ -1047,6 +1057,27 @@ class Dataset:
             UsdGeom.Imageable(p).CreateVisibilityAttr().Set(UsdGeom.Tokens.inherited if shown else UsdGeom.Tokens.invisible)
         return prim, ellipsoids
 
+    def _gaussian_arrays(self, gaussians, opacity, color) -> tuple:
+        """(means (K, 3) nm, covariances (K, 3, 3) nm^2, opacities (K,), colours (K, 3)) of a
+        ``types.Gaussians``, checked: finite, symmetric positive definite, values in [0, 1]."""
+        means = _checked("gaussians.means_xyz_nm", gaussians.means_xyz_nm, (3,))
+        covs = _checked("gaussians.covariances_nm2", gaussians.covariances_nm2, (3, 3))
+        if len(covs) != len(means):
+            raise ValueError(f"{len(means)} means but {len(covs)} covariances")
+        if not np.allclose(covs, np.swapaxes(covs, 1, 2), rtol=1e-6, atol=1e-9 * np.abs(covs).max()):
+            raise ValueError("gaussians.covariances_nm2 must be symmetric")
+        if np.linalg.eigvalsh(covs).min() <= 0:
+            raise ValueError("gaussians.covariances_nm2 must be positive definite")
+        opacities = np.broadcast_to(np.asarray(opacity, dtype=np.float64), (len(means),))
+        if not np.isfinite(opacities).all() or opacities.min() < 0 or opacities.max() > 1:
+            raise ValueError("opacity must be in [0, 1]")
+        if color is None:
+            color = self._instance_color(None, gaussians.instance_id) if gaussians.colors_rgb is None else gaussians.colors_rgb
+        colors = np.broadcast_to(np.asarray(color, dtype=np.float64), (len(means), 3))
+        if not np.isfinite(colors).all() or colors.min() < 0 or colors.max() > 1:
+            raise ValueError("gaussian colours must be in [0, 1]")
+        return means, covs, opacities, colors
+
     def _author_splat_attributes(self, prim, in_space, opacities, colors) -> None:
         """The attributes of the ParticleField3DGaussianSplat schema, per space.  Written with
         the generic attribute API (custom=False: they belong to the schema), because inside
@@ -1061,8 +1092,9 @@ class Dataset:
         harmonics.Set(_vec3f((colors - 0.5) / SH_C0))
         UsdGeom.Primvar(harmonics).SetElementSize(1)
         UsdGeom.Primvar(harmonics).SetInterpolation(UsdGeom.Tokens.vertex)       # RTX insists on vertex
+        # for viewers that draw the prim as plain points; linear, like every displayColor of this module
         display = UsdGeom.PrimvarsAPI(prim).CreatePrimvar("displayColor", _T.Color3fArray, UsdGeom.Tokens.vertex)
-        display.Set(_vec3f(colors))
+        display.Set(_vec3f(srgb_to_linear(colors)))
         self._author(schema_attribute("positions", _T.Point3fArray), lambda space: _vec3f(in_space(space)[0]))
         self._author(schema_attribute("orientations", _T.QuatfArray), lambda space: _quats(in_space(space)[2], half=False))
         self._author(schema_attribute("scales", _T.Float3Array), lambda space: _vec3f(in_space(space)[3]))
@@ -1088,7 +1120,16 @@ class Dataset:
         # 'orientations' (half floats) is the attribute every renderer reads; 'orientationsf' is newer
         self._author(instancer.CreateOrientationsAttr(), lambda space: _quats(in_space(space)[2], half=True))
         self._author(instancer.CreateScalesAttr(), lambda space: _vec3f(k_sigma * in_space(space)[3]))
-        self._author(instancer.CreateExtentAttr(), lambda space: _gaussian_extent(*in_space(space)[:2], k_sigma))
+
+        def extent(space):
+            """The extent as UsdGeom computes it for a PointInstancer: the box around the boxes of
+            the instances, each the box [-1, 1]^3 of the unit sphere under R diag(k sigma).  A
+            little larger than the ellipsoids themselves, so no renderer culls an instance."""
+            mu, _, _, sigmas, rotations = in_space(space)
+            half = np.einsum("nab,nb->na", np.abs(rotations), k_sigma * sigmas)
+            return _vec3f(np.stack([(mu - half).min(axis=0), (mu + half).max(axis=0)]))
+
+        self._author(instancer.CreateExtentAttr(), extent)
         prim = instancer.GetPrim()
         prim.CreateAttribute("em:kind", _T.Token).Set("ellipsoids")
         prim.CreateAttribute("em:kSigma", _T.Double).Set(float(k_sigma))

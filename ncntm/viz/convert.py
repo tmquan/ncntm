@@ -164,15 +164,19 @@ def instance_to_mesh(mask, grid, simplify_factor=None, max_error_nm=None, smooth
     the instance touches the border of the array.  Triangles are counter-clockwise seen
     from outside (the signed volume is checked to be positive).
 
-    simplify_factor  reduce the triangle count by about this factor.  Flat terraces merge,
-                     the section steps of anisotropic data stay: good for a wireframe.
+    simplify_factor  reduce the triangle count by this factor, or by more where flat
+                     terraces merge at no cost.  The section steps of anisotropic data
+                     stay: good for a wireframe.
     max_error_nm     zmesh only: largest distance a vertex may move during simplification
                      (default: the largest voxel edge).
     smooth_sigma_nm  blur the mask with a Gaussian of this sigma before meshing.  The
                      sigma is in nm and converted per axis (sigma / voxel size), so the
                      blur is round in physical space.  Removes the staircase; the surface
-                     no longer lies on voxel faces and thin parts shrink.  Needs
-                     backend="skimage".
+                     no longer lies on voxel faces and thin parts shrink: a plate thinner
+                     than 1.35 sigma disappears, whichever axis it is normal to.  Half the
+                     largest voxel edge is a good sigma: the area of a 400 nm sphere on
+                     30 x 6 x 6 nm voxels is 21 % too large without blur, 13 % with
+                     sigma = 3 nm and under 1 % with sigma = 15 nm.  Needs backend="skimage".
     backend          "zmesh" (fast) or "skimage" (skimage.measure.marching_cubes).  Both
                      give the same surface.  With "skimage", simplification uses
                      zmesh.simplify_fqmr, which has no error bound.
@@ -269,7 +273,9 @@ def instance_to_skeleton(mask, grid, smooth_nm=None, *, dust_nm3=1.0e6, instance
                 times the largest voxel edge is a good window.
     dust_nm3    connected pieces smaller than this physical volume are skipped
                 (kimimaro's own threshold is a voxel count, which means a different size
-                for every voxel size).
+                for every voxel size).  The volume is voxel count * dx * dy * dz of the
+                ``grid`` given, so under ``grid.as_cubes()`` the same piece counts as
+                smaller and may be skipped; dust_nm3=0 keeps every piece.
     **teasar    overrides of ``TEASAR_DEFAULTS`` (scale 1.5, const 300 nm, ...).  The
                 invalidation radius around a traced path is scale * radius + const (nm).
 
@@ -301,6 +307,7 @@ def instance_to_skeleton(mask, grid, smooth_nm=None, *, dust_nm3=1.0e6, instance
         n = int(np.count_nonzero(sub))
         raise ValueError(
             f"mask is too small to skeletonise: {n} voxels = {n * dx * dy * dz:.3g} nm^3 "
+            f"with voxels of {dx:g} x {dy:g} x {dz:g} nm "
             f"(pieces under dust_nm3 = {dust_nm3:.3g} nm^3 are skipped)"
         )
     skeleton = Skeleton(
@@ -412,6 +419,8 @@ def _fit_mixture(mask, grid, k, seed, max_points, part=None, instance_id=0):
     sub, start = _crop_to_mask(mask)
     points = grid.voxel_centers_nm(np.argwhere(sub) + start)         # (N, 3) (x, y, z) nm
     if part is None:
+        if int(max_points) < 1:
+            raise ValueError(f"max_points must be at least 1, got {max_points}")
         part = _kmeans_parts(points, k, seed, max_points)
     n_parts = int(part.max()) + 1
     n = np.bincount(part, minlength=n_parts).astype(np.float64)
@@ -563,27 +572,50 @@ MEASURED = (
 )
 
 
+def mean_radius_nm(skeleton) -> float:
+    """Mean radius ALONG THE CABLE in nm: every edge counts with its length (nm) and with
+    the mean radius of its two nodes.
+
+    Why not the plain mean over the nodes: the nodes are one voxel apart, so their spacing
+    depends on the direction.  On 30 x 6 x 6 nm voxels a stretch inside the section plane
+    has five times more nodes per nanometre than one that crosses the sections, and a
+    mean over nodes would count it five times."""
+    v, e, r = skeleton.vertices_xyz_nm, skeleton.edges, skeleton.radii_nm
+    length = np.linalg.norm(v[e[:, 0]] - v[e[:, 1]], axis=1)         # nm, one per edge
+    if length.sum() == 0:                                            # no edge to weight with
+        return float(np.mean(r))
+    return float((length * 0.5 * (r[e[:, 0]] + r[e[:, 1]])).sum() / length.sum())
+
+
 def measure(mask, grid, smooth_nm=None) -> dict:
     """Numbers one would report about an instance, computed with the voxel size of ``grid``.
 
         n_voxels                voxels in the mask (does not depend on the grid)
         volume_nm3              n_voxels * dx * dy * dz
-        mesh_area_nm2           area of the unsmoothed, unsimplified surface mesh
+        mesh_area_nm2           area of the unsmoothed, unsimplified surface mesh.  On thick
+                                sections that surface is a staircase and reads too much:
+                                +21 % for a sphere of 400 nm radius on 30 x 6 x 6 nm voxels
         mesh_volume_nm3         volume enclosed by that mesh
         cable_length_nm         summed edge length of the raw skeleton (chain of voxel centres)
         cable_length_smooth_nm  the same after ``smooth_skeleton`` with window ``smooth_nm``
         smooth_nm               that window; default 4 x the largest voxel edge of ``grid``
-        mean_radius_nm          mean over the skeleton nodes of their radius
+        mean_radius_nm          ``mean_radius_nm(skeleton)``: mean radius along the cable
         n_branch_points         skeleton nodes with more than two neighbours
         n_end_points            skeleton nodes with one neighbour
 
-    Pass ``grid.as_cubes()`` to get what a program that ignores anisotropy would report."""
+    Pass ``grid.as_cubes()`` to get what a program that ignores anisotropy would report.
+
+    The skeleton is made with dust_nm3=0: every piece of the mask is measured, however
+    small.  A size threshold in nm^3 would depend on the voxel size it is computed with
+    (an object of 2e6 nm^3 on 30 x 6 x 6 nm voxels is only 4e5 nm^3 under
+    ``grid.as_cubes()``) and would drop an object from one column of ``compare_anisotropy``
+    and keep it in the other."""
     mask = _check_mask(mask, grid)
     if smooth_nm is None:
         smooth_nm = 4.0 * float(grid.voxel_size_xyz_nm.max())
     n_voxels = int(np.count_nonzero(mask))
     mesh = instance_to_mesh(mask, grid)
-    skeleton = instance_to_skeleton(mask, grid)
+    skeleton = instance_to_skeleton(mask, grid, dust_nm3=0.0)
     return {
         "n_voxels": n_voxels,
         "volume_nm3": n_voxels * float(np.prod(grid.voxel_size_xyz_nm)),
@@ -592,7 +624,7 @@ def measure(mask, grid, smooth_nm=None) -> dict:
         "cable_length_nm": skeleton.cable_length_nm(),
         "cable_length_smooth_nm": smooth_skeleton(skeleton, smooth_nm).cable_length_nm(),
         "smooth_nm": float(smooth_nm),
-        "mean_radius_nm": float(skeleton.radii_nm.mean()),
+        "mean_radius_nm": mean_radius_nm(skeleton),
         "n_branch_points": skeleton.n_branch_points(),
         "n_end_points": skeleton.n_end_points(),
     }

@@ -25,31 +25,23 @@ every matrix read from USD is transposed once, in ``_world_matrix``.
 from __future__ import annotations
 
 import math
-import os
 import warnings
 from pathlib import Path
 
 import numpy as np
-import warp as wp
 from pxr import Usd, UsdGeom, UsdShade
 
 from . import emray
 from .samples import samples_dir
-from .stage import SH_C0, SPLAT_TYPE, linear_to_srgb, slice_lut8
+from .stage import LAYERS, SH_C0, SPLAT_TYPE, linear_to_srgb, slice_lut8
 
 _NOT_DRAWN = {"", "Xform", "Scope", "Material", "Shader", "NodeGraph", "Camera", "GeomSubset"}
-_VOLUMES = {}        # (file, dataset, box) -> array read from HDF5: each volume is read once per process
+_VOLUMES = {}        # (file, its modification time, dataset, box) -> array read from HDF5, kept for the process
 
 # the 6 faces of the cube [-1, 1]^3, 4 corners each, in order around the face
 _CUBE_QUADS = np.array([[[(s if a == axis else (u if a == (axis + 1) % 3 else v)) for a in range(3)]
                          for u, v in ((-1, -1), (1, -1), (1, 1), (-1, 1))]
                         for axis in range(3) for s in (-1, 1)], dtype=np.float64)
-
-
-def render_device(device=None) -> str:
-    """The Warp device to draw on: ``device`` if given, else the environment variable
-    NCNTM_DEVICE, else Warp's preferred device ("cuda:0" if there is a GPU, else "cpu")."""
-    return str(device or os.environ.get("NCNTM_DEVICE") or wp.get_preferred_device())
 
 
 # ---- reading the stage -----------------------------------------------------------------------
@@ -160,7 +152,8 @@ def load_volume(dataset_prim: Usd.Prim, dataset: str, volumes=None) -> np.ndarra
     2. in the HDF5 file named by em:sampleFile on the dataset prim, searched next to the
        stage file and then in the samples directory ($NCNTM_SAMPLES, else <repository>/samples).
        The box read is em:voxelOffset (i0, j0, k0) + em:shapeVoxels (nx, ny, nz).
-    A file is read once per process and the same array object is returned afterwards."""
+    A file is read once per process (again only if it was modified since) and the same array
+    object is returned afterwards."""
     name = dataset_prim.GetName()
     nx, ny, nz = dataset_prim.GetAttribute("em:shapeVoxels").Get()
     if volumes is not None and name in volumes:
@@ -180,7 +173,8 @@ def load_volume(dataset_prim: Usd.Prim, dataset: str, volumes=None) -> np.ndarra
             raise FileNotFoundError(f"{file_name} not found in {', '.join(str(p) for p in places)}: set the environment "
                                     f"variable NCNTM_SAMPLES, or pass build_scene(stage, volumes={{{name!r}: sample}})")
         i0, j0, k0 = dataset_prim.GetAttribute("em:voxelOffset").Get()
-        key = (str(path), dataset, (k0, j0, i0, nz, ny, nx))
+        # the modification time is part of the key: a file that was written again is read again
+        key = (str(path), path.stat().st_mtime_ns, dataset, (k0, j0, i0, nz, ny, nx))
         if key not in _VOLUMES:
             import h5py
 
@@ -232,9 +226,9 @@ class _Builder:
         counts, indices = mesh.GetFaceVertexCountsAttr().Get(), mesh.GetFaceVertexIndicesAttr().Get()
         if not points or not counts:
             return self.skip(prim, "Mesh without points or faces")
-        world = _to_world(m, points)
         if prim.HasAttribute("em:slice:axis"):
-            return self.slice(prim, m, layer, world)
+            return self.slice(prim, m, layer, np.array(points, dtype=np.float64))
+        world = _to_world(m, points)
         triangles, face = _triangulate(counts, indices)
         rgb, opacity, lit = _style(prim)
         rgba = _rgba(rgb, opacity, n=len(counts))
@@ -242,30 +236,39 @@ class _Builder:
             rgba = rgba[face]
         self.scene.add_mesh(world, triangles, color=rgba, lit=lit, object_id=self.object_id(prim, layer))
 
-    def slice(self, prim, m, layer, world_corners):
+    def slice(self, prim, m, layer, corners):
         """A slice quad: its colour is the volume sampled at the world position of each ray hit.
 
-        The points of the quad are voxel index coordinates (corner convention), so ``m``, the
-        world matrix of the quad, is also the index-to-world matrix of the volume.  The ray
-        caster counts voxels from their centres, so its origin is the image of (0.5, 0.5, 0.5)."""
-        if len(world_corners) != 4:
+        ``corners`` (4, 3) are the points of the quad: voxel index coordinates (corner
+        convention).  So ``m``, the world matrix of the quad, is also the index-to-world matrix
+        of the volume: its diagonal is the size of a voxel as drawn, its translation the low
+        corner of voxel [0, 0, 0].  The volume is sampled where the quad IS; that this is the
+        plane the attributes name (through the centre of voxel layer em:slice:index) is checked."""
+        if len(corners) != 4:
             return self.skip(prim, "slice that is not a quad")
-        colormap = prim.GetAttribute("em:slice:colorMap").Get()
-        window = tuple(prim.GetAttribute("em:slice:window").Get())
-        array = load_volume(_dataset_prim(prim), prim.GetAttribute("em:slice:dataset").Get(), self.volumes)
+        said = {name: prim.GetAttribute(f"em:slice:{name}").Get() for name in ("dataset", "axis", "index", "colorMap", "window")}
+        if None in said.values() or said["axis"] not in ("x", "y", "z"):
+            raise ValueError(f"{prim.GetPath()}: a slice quad needs em:slice:dataset, axis (x, y or z), index, colorMap "
+                             f"and window; found {said}")
+        if np.abs(corners[:, "xyz".index(said["axis"])] - (said["index"] + 0.5)).max() > 1e-6:
+            raise ValueError(f"{prim.GetPath()} says it is the slice {said['axis']} = {said['index']}, but its points do "
+                             f"not lie in the plane {said['axis']} = {said['index']} + 0.5 (voxel index units)")
+        world_corners = _to_world(m, corners)
+        colormap, window = said["colorMap"], tuple(said["window"])
+        array = load_volume(_dataset_prim(prim), said["dataset"], self.volumes)
         linear = m[:3, :3]
         if np.abs(linear - np.diag(np.diag(linear))).max() > 1e-9 * np.abs(linear).max() or np.diag(linear).min() <= 0:
             raise NotImplementedError(f"{prim.GetPath()}: the ray caster samples axis-aligned volumes only, "
                                       "but the voxels frame is rotated or mirrored in the world")
         key = (id(array), m.tobytes(), colormap, window)
         if key not in self.samplers:
-            voxel_size_zyx = (linear[2, 2], linear[1, 1], linear[0, 0])        # world units per voxel
-            origin = linear @ np.full(3, 0.5) + m[:3, 3]                      # centre of voxel [0, 0, 0]
-            if colormap == "labels":
-                self.samplers[key] = self.scene.add_volume(array, voxel_size_zyx, origin, labels=True, zero_alpha=1.0)
-            else:
+            placement = dict(voxel_size=(linear[2, 2], linear[1, 1], linear[0, 0]),      # (dz, dy, dx), world units
+                             origin=m[:3, 3], convention="corner")
+            if colormap == "labels":                    # ids through the colour hash, id 0 dark and opaque
+                self.samplers[key] = self.scene.add_volume(array, labels=True, zero_alpha=1.0, **placement)
+            else:                                       # stored numbers through the same table as the texture
                 lut = np.concatenate([slice_lut8(colormap, window) / 255.0, np.ones((256, 1))], axis=1)
-                self.samplers[key] = self.scene.add_volume(array, voxel_size_zyx, origin, lut=lut)
+                self.samplers[key] = self.scene.add_volume(array, lut=lut, **placement)
         self.scene.add_quads(world_corners[None], sampler=self.samplers[key], color=(1.0, 1.0, 1.0, 1.0), lit=False,
                              object_id=self.object_id(prim, layer))
 
@@ -328,7 +331,8 @@ class _Builder:
         """Draw ``proto`` (a Cube or a Sphere) once per matrix.  ``matrices`` are
         (N, 4, 4) prototype-to-world matrices in USD's ROW-vector convention: row a of the
         upper 3x3 is the image of the local axis a, row 3 is the centre.  Any affine matrix
-        is exact here: boxes become parallelepipeds, spheres become ellipsoids."""
+        is exact here: boxes become parallelepipeds, spheres become ellipsoids.
+        The colour is the prototype's (per-instance primvars on an instancer are not read)."""
         linear, centre = matrices[:, :3, :3], matrices[:, 3, :3]
         rgb, opacity, lit = _style(proto)
         style = dict(color=_rgba(rgb, opacity), lit=lit, object_id=oid)
@@ -406,17 +410,26 @@ def build_scene(stage: Usd.Stage, layers=None, device=None, volumes=None, *, tub
     """The composed ``stage`` as an ``emray.Scene``, built on ``device`` and ready to render.
 
     layers    None: everything; else a list of layer names (values of em:layer, e.g.
-              ["rawvalue", "frame"]): only prims of these layers are drawn
-    device    Warp device; default ``render_device()`` (NCNTM_DEVICE, else Warp's choice)
+              ["rawvalue", "frame"]): only prims of these layers are drawn ("" = prims without
+              a tag).  A name that is neither one of ``stage.LAYERS`` nor on the stage raises
+              ValueError
+    device    Warp device; default ``emray.default_device()`` (the environment variable
+              NCNTM_DEVICE, else Warp's preferred device)
     volumes   arrays for the slices of datasets that have no HDF5 file, see ``load_volume``
     tube_sides, sphere_subdiv   tessellation of tubes and spheres
 
-    The scene has one extra attribute: ``scene.objects``, {object id: {"path", "layer",
-    "type"}}, to read the object-id buffer of a rendered image.  Which variant of "space"
-    is drawn is whatever is selected on the stage: switch it with ``Dataset.set_space``
-    and build again."""
+    The scene gets two extra attributes: ``scene.objects``, {object id: {"path", "layer",
+    "type"}}, to read the object-id buffer of a rendered image (one id per prim, from 1), and
+    ``scene.skipped``, {reason: [prim paths]}, the content of the warning.  Which variant of
+    "space" is drawn is whatever is selected on the stage: switch it with
+    ``Dataset.set_space`` and build again."""
     if layers is not None:
         layers = [layers] if isinstance(layers, str) else list(layers)
+        on_stage = {prim.GetAttribute("em:layer").Get() for prim in stage.Traverse() if prim.HasAttribute("em:layer")}
+        unknown = [name for name in layers if name not in LAYERS and name not in on_stage and name != ""]
+        if unknown:                                    # a misspelt name would give an empty picture without a word
+            raise ValueError(f"unknown layer(s) {unknown}: this stage has {sorted(on_stage)}, the package's layers "
+                             f"are {list(LAYERS)} ('' selects prims without a layer tag)")
     builder = _Builder(volumes, tube_sides, sphere_subdiv)
     drawn_purposes = (UsdGeom.Tokens.default_, UsdGeom.Tokens.render)
     prims = iter(Usd.PrimRange(stage.GetPseudoRoot()))
@@ -426,7 +439,7 @@ def build_scene(stage: Usd.Stage, layers=None, device=None, volumes=None, *, tub
         imageable = UsdGeom.Imageable(prim)
         if imageable and (imageable.ComputeVisibility() == UsdGeom.Tokens.invisible
                           or imageable.ComputePurpose() not in drawn_purposes):
-            prims.PruneChildren()                      # invisible: the whole subtree is
+            prims.PruneChildren()                      # an invisible prim hides its whole subtree
             continue
         type_name = prim.GetTypeName()
         if type_name in ("Material", "PointInstancer"):
@@ -448,7 +461,7 @@ def build_scene(stage: Usd.Stage, layers=None, device=None, volumes=None, *, tub
                  for reason, paths in builder.skipped.items()]
         warnings.warn("build_scene left these prims out or approximated them:\n" + "\n".join(lines), stacklevel=2)
     builder.scene.skipped = builder.skipped
-    return builder.scene.build(render_device(device))
+    return builder.scene.build(device)
 
 
 # ---- cameras -------------------------------------------------------------------------------------

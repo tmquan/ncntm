@@ -4,10 +4,12 @@
 
 The samples directory is $NCNTM_SAMPLES if set, else <repository>/samples.
 """
+import json
 import os
 import sys
 import tempfile
 import traceback
+from contextlib import contextmanager
 from functools import lru_cache
 from pathlib import Path
 
@@ -280,6 +282,186 @@ def test_every_sample_in_the_manifest_loads_with_its_declared_grid():
             assert np.array_equal(s.instance_ids(), np.arange(1, n + 1)), entry["name"]     # 1 = largest
             assert len(s.skeleton_subjects) == 3, entry["name"]
             assert all(1 <= i <= n for i in s.skeleton_subjects), entry["name"]
+
+
+# ---- a sample file written by the test: needs none of the shipped files ---------------------------
+# Every shipped sample has dy = dx, so they cannot show a swap of the two.  This one has the
+# voxel size (dz, dy, dx) = (30, 8, 6) nm and the array shape (12, 20, 28): all different.
+TOY_VOXEL_ZYX = (30.0, 8.0, 6.0)
+
+
+def toy_arrays():
+    """raw and instance arrays of the toy sample.  Instance 1 is one box (384 voxels);
+    instance 2 is a box of 48 voxels plus a box of 9 that touches it only through a
+    corner (so through no face); instance 3 is 6 voxels in a corner of the array."""
+    raw = np.random.default_rng(0).integers(0, 256, size=(12, 20, 28), dtype=np.uint8)
+    instance = np.zeros(raw.shape, dtype=np.uint16)
+    instance[2:6, 3:9, 4:20] = 1
+    instance[8:10, 10:14, 4:10] = 2
+    instance[10:11, 14:17, 10:13] = 2
+    instance[0:1, 0:2, 25:28] = 3
+    return raw, instance
+
+
+def write_toy_sample(folder):
+    """Write toy.h5 and manifest.json into ``folder`` with the layout of scripts/make_samples.py."""
+    import h5py
+
+    raw, instance = toy_arrays()
+    boxes = np.zeros((4, 6), dtype=np.int32)
+    for i in (1, 2, 3):
+        where = np.argwhere(instance == i)
+        boxes[i] = list(where.min(axis=0)) + list(where.max(axis=0) + 1)
+    with h5py.File(Path(folder) / "toy.h5", "w") as f:
+        f.create_dataset("raw", data=raw)
+        f.create_dataset("instance", data=instance)
+        f.create_dataset("instance_voxel_counts", data=np.bincount(instance.ravel()).astype(np.uint32))
+        f.create_dataset("instance_bbox_zyx", data=boxes)
+        f.attrs["voxel_size_zyx_nm"] = np.array(TOY_VOXEL_ZYX)
+        f.attrs["axis_order"] = "zyx"
+        f.attrs["intensity_norm_min"] = 50.0
+        f.attrs["intensity_norm_max"] = 150.0
+        f.attrs["skeleton_subject_ids"] = np.array([2, 1, 3])
+    with open(Path(folder) / "manifest.json", "w", encoding="utf-8") as f:
+        json.dump({"samples": [{"name": "toy", "file": "toy.h5"}]}, f)
+
+
+@contextmanager
+def toy_samples_dir():
+    """NCNTM_SAMPLES points at a temporary folder that holds the toy sample, then is restored."""
+    saved = os.environ.get("NCNTM_SAMPLES")
+    with tempfile.TemporaryDirectory() as tmp:
+        write_toy_sample(tmp)
+        os.environ["NCNTM_SAMPLES"] = tmp
+        try:
+            yield Path(tmp)
+        finally:
+            if saved is None:
+                del os.environ["NCNTM_SAMPLES"]
+            else:
+                os.environ["NCNTM_SAMPLES"] = saved
+
+
+def test_toy_file_gives_each_axis_its_own_voxel_size():
+    raw, instance = toy_arrays()
+    with toy_samples_dir() as folder:
+        assert S.list_samples() == ["toy"]
+        s = S.load_sample("toy")
+        assert s.path == folder.resolve() / "toy.h5"
+    assert np.array_equal(s.raw, raw) and np.array_equal(s.instance, instance) and s.instance.dtype == np.uint16
+    # (z, y, x) in the file and in the grid; (x, y, z) for coordinates
+    assert s.grid.shape_zyx == (12, 20, 28) and s.grid.voxel_size_zyx_nm == TOY_VOXEL_ZYX
+    assert np.array_equal(s.grid.voxel_size_xyz_nm, [6.0, 8.0, 30.0])
+    assert np.array_equal(s.grid.extent_xyz_nm, [28 * 6.0, 20 * 8.0, 12 * 30.0])
+    assert s.attrs["voxel_size_zyx_nm"] == [30.0, 8.0, 6.0] and s.attrs["axis_order"] == "zyx"
+    assert s.norm_window == (50.0, 150.0) and s.skeleton_subjects == (2, 1, 3)
+    # tables read from the file agree with the labels; 1 = largest
+    assert list(s.instance_ids()) == [1, 2, 3]
+    assert [s.voxel_count(i) for i in (1, 2, 3)] == [384, 57, 6]
+    assert s.bbox_zyx(2) == (8, 10, 4, 11, 17, 13) and s.bbox_zyx(3) == (0, 0, 25, 1, 2, 28)
+
+
+def test_toy_voxvalue_is_exactly_the_window():
+    raw, _ = toy_arrays()
+    with toy_samples_dir():
+        s = S.load_sample("toy")
+    v = s.voxvalue()
+    assert v.dtype == np.float32 and v.shape == raw.shape
+    assert np.allclose(v, np.clip((raw.astype(np.float64) - 50.0) / 100.0, 0.0, 1.0), atol=1e-6)
+    assert (v[raw <= 50] == 0.0).all() and (v[raw >= 150] == 1.0).all() and (v[raw == 100] == 0.5).all()
+    assert (raw < 50).any() and (raw > 150).any() and (raw == 100).any()          # all three cases occur
+    assert np.array_equal(s.rawvalue, raw)                                          # the stored numbers are untouched
+    # equalised sections: every z section gets the same mean and standard deviation, before the window
+    planes = raw.astype(np.float64)
+    mean, std = planes.mean(axis=(1, 2), keepdims=True), planes.std(axis=(1, 2), keepdims=True)
+    levelled = (planes - mean) / std * np.median(std) + np.median(mean)
+    assert np.allclose(s.voxvalue(equalize_sections=True), np.clip((levelled - 50.0) / 100.0, 0.0, 1.0), atol=1e-4)
+
+
+def test_toy_mask_keeps_the_largest_piece_joined_through_faces():
+    _, instance = toy_arrays()
+    with toy_samples_dir():
+        s = S.load_sample("toy")
+    everything = s.mask(2, largest_component=False)
+    assert np.array_equal(everything, instance == 2) and everything.sum() == 57
+    piece = s.mask(2)
+    assert piece.dtype == bool and piece.shape == instance.shape and piece.sum() == 48
+    assert piece[8:10, 10:14, 4:10].all() and not piece[10].any()                  # the corner-touching box is dropped
+    assert np.array_equal(s.mask(1), instance == 1)                                # one piece: nothing is dropped
+    assert raises(ValueError, s.mask, 4) and raises(ValueError, s.mask, 0)
+
+
+def test_toy_crop_and_strided_use_the_voxel_size_of_their_own_axis():
+    raw, instance = toy_arrays()
+    with toy_samples_dir():
+        s = S.load_sample("toy")
+        box = (slice(2, 10), slice(3, 17), slice(4, 20))
+        read_cropped = S.load_sample("toy", crop=box)
+    c = s.crop(*box)
+    # the corner of the first kept voxel [2, 3, 4]: x = 4 * 6, y = 3 * 8, z = 2 * 30 nm
+    assert np.array_equal(c.origin_xyz_nm, [24.0, 24.0, 60.0])
+    assert c.grid.shape_zyx == (8, 14, 16) and c.grid.voxel_size_zyx_nm == TOY_VOXEL_ZYX
+    assert np.array_equal(c.raw, raw[2:10, 3:17, 4:20]) and np.array_equal(c.instance, instance[2:10, 3:17, 4:20])
+    assert list(c.instance_ids()) == [1, 2] and c.voxel_count(2) == 48 and c.bbox_zyx(1) == (0, 0, 0, 4, 6, 16)
+    assert np.array_equal(read_cropped.raw, c.raw) and np.array_equal(read_cropped.origin_xyz_nm, c.origin_xyz_nm)
+    assert read_cropped.grid == c.grid and read_cropped.derivation == c.derivation
+    assert list(read_cropped.instance_ids()) == [1, 2] and read_cropped.voxel_count(2) == 48   # counted in the crop, not the file
+    assert read_cropped.bbox_zyx(1) == (0, 0, 0, 4, 6, 16)
+    # strided: only the voxel size and the length of the strided axis change
+    for axis, size, shape in ((0, (60.0, 8.0, 6.0), (6, 20, 28)), (1, (30.0, 16.0, 6.0), (12, 10, 28)),
+                              (2, (30.0, 8.0, 12.0), (12, 20, 14))):
+        t = s.strided(2, axis=axis, phase=1)
+        assert t.grid.voxel_size_zyx_nm == size and t.grid.shape_zyx == shape == t.raw.shape == t.instance.shape, axis
+        assert np.array_equal(t.grid.extent_xyz_nm, s.grid.extent_xyz_nm), axis   # the same piece of tissue
+        keep = [slice(None)] * 3
+        keep[axis] = slice(1, None, 2)
+        assert np.array_equal(t.raw, raw[tuple(keep)]) and np.array_equal(t.instance, instance[tuple(keep)]), axis
+        assert np.array_equal(t.origin_xyz_nm, [0.0, 0.0, 0.0]), axis
+
+
+def test_strided_draws_the_kept_plane_as_its_whole_slab():
+    # fib25-like: 8 nm voxels, step 4.  An object one plane thick, in plane `phase` of slab 1.
+    grid = VoxelGrid((16, 6, 6), (8.0, 8.0, 8.0))
+    for phase in range(4):
+        instance = np.zeros(grid.shape_zyx, dtype=np.uint8)
+        instance[4 + phase, 1:5, 1:5] = 1
+        s = S.Sample("toy", Path("toy.h5"), np.zeros(grid.shape_zyx, dtype=np.uint8), instance, grid, {}, (0.0, 255.0))
+        t = s.strided(4, phase=phase)
+        assert t.grid.voxel_size_zyx_nm == (32.0, 8.0, 8.0) and t.grid.shape_zyx == (4, 6, 6)
+        assert np.array_equal(np.argwhere(t.mask(1).any(axis=(1, 2))), [[1]])       # it is in thick voxel 1
+        z_true = s.grid.voxel_centers_nm(np.argwhere(s.mask(1)))[:, 2].mean()       # (4 + phase + 0.5) * 8 nm
+        z_drawn = t.grid.voxel_centers_nm(np.argwhere(t.mask(1)))[:, 2].mean()      # 1.5 * 32 nm
+        assert np.isclose(z_drawn - z_true, (4 / 2 - phase - 1 / 2) * 8.0)          # +12, +4, -4, -12 nm
+        # other phases do not see it at all: a label is never averaged
+        assert all(1 not in s.strided(4, phase=other).instance for other in range(4) if other != phase)
+    assert (4 / 2 - 0 - 1 / 2) * 8.0 == 12.0                                        # the number in the docstring
+
+
+def test_sample_refuses_arrays_that_do_not_fit():
+    grid = VoxelGrid((2, 3, 4), TOY_VOXEL_ZYX)
+    raw = np.zeros((2, 3, 4), dtype=np.uint8)
+    labels = np.zeros((2, 3, 4), dtype=np.int32)
+    labels[0, 0, 0] = 5
+    ok = S.Sample("toy", Path("toy.h5"), raw, labels, grid, {}, (0.0, 255.0))
+    assert list(ok.instance_ids()) == [5] and ok.bbox_zyx(5) == (0, 0, 0, 1, 1, 1) and ok.skeleton_subjects == ()
+
+    def make(**change):
+        fields = dict(name="toy", path=Path("toy.h5"), raw=raw, instance=labels, grid=grid, attrs={}, norm_window=(0.0, 255.0))
+        return S.Sample(**{**fields, **change})
+
+    assert raises(ValueError, make, raw=raw.astype(np.float32))                    # rawvalue is uint8
+    assert raises(ValueError, make, raw=raw.T.copy())                              # (x, y, z) array with a (z, y, x) grid
+    assert raises(ValueError, make, instance=labels[:, :, :3])
+    assert raises(ValueError, make, instance=labels.astype(np.float32))
+    assert raises(ValueError, make, norm_window=(10.0, 10.0))
+    assert raises(ValueError, make, norm_window=(0.0, float("nan")))
+    negative = labels.copy()
+    negative[1, 1, 1] = -1
+    assert raises(ValueError, make, instance=negative)                             # refused at once, with a clear message
+    try:
+        make(instance=negative)
+    except ValueError as error:
+        assert "negative" in str(error)
 
 
 def run_as_script(namespace) -> int:

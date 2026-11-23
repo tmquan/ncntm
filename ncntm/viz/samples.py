@@ -109,6 +109,8 @@ class Sample:
                 raise ValueError(f"instance has shape {self.instance.shape}, raw has {self.raw.shape}")
             if not np.issubdtype(self.instance.dtype, np.integer):
                 raise ValueError(f"instance must be an integer array, got {self.instance.dtype}")
+            if np.issubdtype(self.instance.dtype, np.signedinteger) and self.instance.min() < 0:
+                raise ValueError("instance labels must not be negative (0 is background)")
         lo, hi = self.norm_window
         if not (np.isfinite(lo) and np.isfinite(hi) and hi > lo):
             raise ValueError(f"norm_window must be (lo, hi) with hi > lo, got {self.norm_window}")
@@ -220,7 +222,8 @@ class Sample:
     def skeleton_subjects(self) -> tuple:
         """The three ids recommended for skeletons, from the file attribute
         ``skeleton_subject_ids``: (a neurite that runs across the sections, one that runs
-        inside the section plane, the most branched one).  Empty for image-only samples."""
+        inside the section plane, the most branched one).  Empty for image-only samples.
+        They were chosen in the whole file: a crop may hold only a part of one, or none of it."""
         return tuple(int(i) for i in self.attrs.get("skeleton_subject_ids", ()))
 
     # ---- derived samples ---------------------------------------------------------------------
@@ -256,7 +259,12 @@ class Sample:
         one thin plane every ``step`` would store) or the rounded mean of the slab with
         mode="slab_mean" (a section that integrates over its thickness).
 
-        The new grid is ``grid.strided(step, axis)`` of the slab-complete block."""
+        The new grid is ``grid.strided(step, axis)`` of the slab-complete block: one thick
+        voxel per slab, and the kept plane stands for the whole slab.  The centre of a
+        thick voxel is therefore (step / 2 - phase - 1 / 2) thin voxels further along the
+        axis than the plane its label was read from: 12 nm for fib25 with step 4 and
+        phase 0.  That is under half a thick voxel, but it shows when a strided object is
+        drawn over the original."""
         step, axis, phase = int(step), int(axis), int(phase)
         if step < 1 or axis not in (0, 1, 2) or not 0 <= phase < step:
             raise ValueError(f"strided: need step >= 1, axis in 0..2 and 0 <= phase < step, got {step}, {axis}, {phase}")
