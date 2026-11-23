@@ -1,0 +1,311 @@
+# =====================================================================
+# pretrain.yaml  --  Cosmos3-Edge (4B) self-supervised pretraining on
+# SNEMI3D / Kasthuri 2015 + COSEM 4 nm raw EM only (no segmentation)
+# =====================================================================
+# Every batch is task ``ssl``: reconstruct clean 4 nm EM from a degraded
+# large-voxel input (RandResolutionDegraded).  Same model, fine grid, SSL
+# degradation and loss as the nanoCosmos 4B pretrain, restricted to the
+# volumes in data/SNEMI3D (see docs/DATASETS.md).
+#
+# The head is still 32 channels (30 affinity offsets + sem + raw) so a later
+# SFT run can load this checkpoint without a head-shape change.
+#
+# Volumes resolve under $NCNTM_DATA_DIR (default: <cwd>/data); missing
+# volumes are skipped with a warning, so run from the repo root.
+# Backbone weights come from $NCNTM_CACHE_DIR (default ~/.cache/ncntm/cosmos25).
+# =====================================================================
+
+experiment_name: ncntm-4B-pretrain-snemi3d
+project_name: ncntm
+seed: 42
+ckpt_path: null
+ckpt_path_skip_prefixes: []
+ckpt_path_only_prefixes: null
+
+snemi_root: ${oc.env:NCNTM_DATA_DIR,${hydra:runtime.cwd}/data}/SNEMI3D
+cosem_root: ${oc.env:NCNTM_DATA_DIR,${hydra:runtime.cwd}/data}/COSEM3D
+
+data:
+  # Fixed fine network grid: 4 nm cubic voxel, patch (z, y, x).  Wan2.2 VAE
+  # is 4x in z and 16x in xy -> DiT latent grid (64, 16, 16).
+  patch_size: [256, 256, 256]
+  pixel_size: [4, 4, 4]
+  # Train-only z/y/x permutation (cubic FOV); section degradation follows
+  # the native section axis.
+  rand_transpose_zyx: true
+  num_workers: 8
+  pin_memory: true
+  persistent_workers: true
+  prefetch_factor: 8
+  # Crop gates on the per-volume [0,1] scale: non-zero fraction, std, and
+  # lag-1 autocorrelation (real ultrastructure ~0.6-0.8, noise ~0).
+  ssl_min_foreground: 0.7
+  ssl_min_std: 0.05
+  ssl_min_autocorr: 0.5
+  balance: dataset
+  within_dataset: tissue
+
+  # Augment (whole-crop gamma) is in the loss target; Corrupt (per-section
+  # jitter / gamma / noise) and Missing (whole native sections) touch the
+  # input only.  30x6x6 crops are anisotropic: one in-plane axis is
+  # downsampled to the 30 nm z spacing with probability fine_axis_prob.
+  degrade:
+    zf_range: [2.0, 10.0]
+    fine_axis_prob: 0.8
+    slab_mean_prob: 0.5
+    volume_contrast_prob: 0.5
+    volume_contrast_gamma: [0.8, 1.25]
+    jitter_prob: 0.5
+    max_jitter: 2.0
+    contrast_prob: 0.5
+    contrast_gamma: [0.8, 1.25]
+    noise_prob: 0.3
+    noise_std: 0.01
+    missing_prob: 0.3
+    max_missing: 2
+    missing_fill: zero
+
+  branches:
+    ssl:
+      task: ssl
+      batch_size: 2
+      sample_weight: 1.0
+      volumes:
+      # Kasthuri cropping (cc): x 2512-8416, y 4432-9248, z 0-1848.  It
+      # contains AC4 and the cylinder's lower half, and overlaps AC3 in y
+      # 8712-9248, so the val volumes below are not a spatial holdout.
+      - vol: neurons_cc_5904x4816x1848_x2512_y4432_z0_volume
+        root: ${snemi_root}
+        dataset: kasthuri_cc
+        native_resolution: [30, 6, 6]
+        imaging: ssSEM
+      # Kasthuri cylinder (cc) image: adds y 9248-10100 outside the cropping.
+      - vol: neurons_cc_5000x2900x300_x3000_y7200_z950_volume
+        root: ${snemi_root}
+        dataset: kasthuri_cc
+        native_resolution: [30, 6, 6]
+        imaging: ssSEM
+      # COSEM FIB-SEM at true 4 nm cubic voxels (the fine grid itself, so no
+      # degrade-by-resampling of the target).  Group name defaults to the root
+      # dir name (COSEM3D); balance: dataset gives it an equal batch share.
+      - {vol: jrc_hela-3_4nm_x4096_y0_z2048_volume, root: "${cosem_root}", native_resolution: [4, 4, 4], imaging: FIB-SEM}
+      - {vol: jrc_hela-3_4nm_x6144_y0_z2048_volume, root: "${cosem_root}", native_resolution: [4, 4, 4], imaging: FIB-SEM}
+      - {vol: jrc_hela-3_4nm_x4096_y0_z0_volume, root: "${cosem_root}", native_resolution: [4, 4, 4], imaging: FIB-SEM}
+      - {vol: jrc_hela-3_4nm_x4096_y0_z4096_volume, root: "${cosem_root}", native_resolution: [4, 4, 4], imaging: FIB-SEM}
+      - {vol: jrc_hela-3_4nm_x2048_y0_z4096_volume, root: "${cosem_root}", native_resolution: [4, 4, 4], imaging: FIB-SEM}
+      - {vol: jrc_macrophage-2_4nm_x4096_y0_z4096_volume, root: "${cosem_root}", native_resolution: [4, 4, 4], imaging: FIB-SEM}
+      - {vol: jrc_jurkat-1_4nm_x4096_y0_z0_volume, root: "${cosem_root}", native_resolution: [4, 4, 4], imaging: FIB-SEM}
+      - {vol: jrc_jurkat-1_4nm_x4096_y0_z4096_volume, root: "${cosem_root}", native_resolution: [4, 4, 4], imaging: FIB-SEM}
+
+  val_batch_size: 2
+  # One group per dataset name: 5 groups (4 SNEMI3D + COSEM3D) x 16 crops /
+  # batch 2 = 40 batches.
+  val_balance: dataset
+  val_num_samples: 16
+  val_volumes:
+  # COSEM holdouts (tiles not in the train list).
+  - {vol: jrc_hela-3_4nm_x6144_y0_z0_volume, root: "${cosem_root}", task: ssl, native_resolution: [4, 4, 4], imaging: FIB-SEM}
+  - {vol: jrc_macrophage-2_4nm_x2048_y0_z4096_volume, root: "${cosem_root}", task: ssl, native_resolution: [4, 4, 4], imaging: FIB-SEM}
+  - {vol: jrc_jurkat-1_4nm_x0_y0_z2048_volume, root: "${cosem_root}", task: ssl, native_resolution: [4, 4, 4], imaging: FIB-SEM}
+  - vol: AC3_cc_inputs
+    root: ${snemi_root}
+    dataset: AC3_cc
+    task: ssl
+    native_resolution: [30, 6, 6]
+    imaging: ssSEM
+  - vol: AC4_cc_inputs
+    root: ${snemi_root}
+    dataset: AC4_cc
+    task: ssl
+    native_resolution: [30, 6, 6]
+    imaging: ssSEM
+  # Uncorrected-contrast copies of the same tissue: tracks robustness to the
+  # per-slice brightness swings the cc training data does not have.
+  - vol: AC3_em_inputs
+    root: ${snemi_root}
+    dataset: AC3_em
+    task: ssl
+    native_resolution: [30, 6, 6]
+    imaging: ssSEM
+  - vol: AC4_em_inputs
+    root: ${snemi_root}
+    dataset: AC4_em
+    task: ssl
+    native_resolution: [30, 6, 6]
+    imaging: ssSEM
+
+model:
+  type: joint3d_edge           # JointEdge3DModule (Cosmos3-Edge ~4B)
+  variant: EDGE
+  in_channels: 1
+  head_channels: 32            # len(loss.seg.offsets)=30 + sem + raw
+  feature_size: 64
+  dropout: 0.5
+  pretrained: true
+  dtype: bf16                  # paired with training.precision bf16-true
+  # Frozen: Wan VAE encoder and decoder, and the AR reasoner (embed_tokens,
+  # AR MLP / norms, lm_head, AR half of packed attention).  The DiT
+  # generation half, EM feature projector and task head train.
+  freeze_vae_encoder: true
+  freeze_vae_decoder: true
+  freeze_dit_backbone: false
+  freeze_understanding_stream: true
+  freeze_understanding_ffn: true
+  gradient_checkpointing:
+  - dit
+  - decode
+  vae_input_pm1: true
+  vae_symmetrize_z: false
+
+optimizer:
+  lr: 6.0e-5
+  weight_decay: 0.0001
+  betas: [0.9, 0.99]
+  master_dtype: fp32
+  scheduler:
+    type: cosine_warmup
+    T_max: 101
+    eta_min: 6.0e-6
+    warmup_epochs: 1
+  dit_backbone_lr: 6.0e-5
+
+# Joint3DReconSegLoss, reconstruction only.  The seg block only fixes the
+# 32-channel head layout; weight_seg is 0 and no sft batch is drawn.
+loss:
+  type: joint3d
+  recon_loss: l1
+  weight_rec: 1.0
+  weight_dif: 1.0
+  diffusion_steps: 35
+  weight_seg: 0.0
+  weight_ssl: 5.0
+  weight_sft: 0.0
+  # Residual next-scale reconstruction, coarse to fine; a scale is scored
+  # only when the crop was measured at least that finely.
+  var:
+    enabled: true
+    fine_nm: 4
+    scales_nm: [32, 16, 8, 4]
+  seg:
+    ignore_index: -100
+    background: -1
+    n_pull: 5
+    offsets:
+    - [-1, 0, 0]
+    - [0, -1, 0]
+    - [0, 0, -1]
+    - [0, -1, -1]
+    - [0, 1, -1]
+    - [-2, 0, 0]
+    - [-3, 0, 0]
+    - [-4, 0, 0]
+    - [-5, 0, 0]
+    - [-8, 0, 0]
+    - [0, -2, 0]
+    - [0, 0, -2]
+    - [0, -4, 0]
+    - [0, 0, -4]
+    - [0, -8, 0]
+    - [0, 0, -8]
+    - [0, -16, 0]
+    - [0, 0, -16]
+    - [0, -32, 0]
+    - [0, 0, -32]
+    - [0, -2, -2]
+    - [0, 2, -2]
+    - [0, -4, -4]
+    - [0, 4, -4]
+    - [0, -8, -8]
+    - [0, 8, -8]
+    - [0, -16, -16]
+    - [0, 16, -16]
+    - [0, -32, -32]
+    - [0, 32, -32]
+    weight_aff:
+      weight: 1.0
+      lambda_bce: 1.0
+      lambda_dice: 1.0
+      lambda_focal: 1.0
+      gamma: 3.0
+      pull_weight: 1.0
+      push_weight: 3.0
+      mask_to_foreground: true
+      class_balance: auto
+      class_balance_clip: 10.0
+      dice_two_sided: true
+    weight_sem:
+      weight: 1.0
+      lambda_bce: 1.0
+      lambda_dice: 1.0
+      lambda_focal: 1.0
+      gamma: 3.0
+      class_balance: auto
+      class_balance_clip: 10.0
+      dice_two_sided: true
+
+training:
+  # Constructed by the module but never run (ssl batches carry no labels).
+  mutex_watershed:
+    strides: [1, 1, 1]
+    size_filter: 50
+    backend: auto
+    buckets: 16
+    max_push_edges: null
+    gate_with_sem: true
+    sem_gate_threshold: 0.5
+    grow_boundaries: false
+    grow_max_distance: 0.0
+  max_epochs: 101
+  accelerator: auto
+  devices: auto
+  strategy: ddp
+  use_distributed_sampler: false
+  precision: bf16-true
+  gradient_clip_val: 1.0
+  accumulate_grad_batches: 1
+  val_check_interval: 1.0
+  limit_train_batches: 500
+  # 32 val batches (see val_num_samples); 40 covers the per-rank shard.
+  limit_val_batches: 40
+  check_val_every_n_epoch: 10
+  num_sanity_val_steps: 2
+  log_every_n_steps: 100
+  log_recon_steps: false
+  enable_progress_bar: true
+  enable_model_summary: true
+  deterministic: false
+  benchmark: true
+  fast_dev_run: false
+  resume_from_checkpoint: null
+
+callbacks:
+  checkpoint:
+    enabled: true
+    dirpath: null
+    filename: '{epoch:02d}-{val/automatic/loss:.4f}'
+    save_top_k: 3
+    monitor: val/automatic/loss
+    mode: min
+    save_last: true
+    verbose: true
+  # Trainable weights only, ~2.8 GB each in bf16; save_top_k -1 keeps all.
+  weights_checkpoint:
+    enabled: true
+    every_n_epochs: 20
+    save_top_k: -1
+  lr_monitor:
+    enabled: true
+  image_logger:
+    enabled: true
+    every_n_epochs: 1
+    max_images: 8
+  cuda_empty_cache_before_val: true
+  memory_logger:
+    enabled: true
+    log_every_n_steps: null
+
+output_dir: ${oc.env:HOME}/outputs/ncntm
+
+hydra:
+  job:
+    chdir: false

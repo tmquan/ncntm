@@ -1,0 +1,589 @@
+"""
+Joint super-resolution-reconstruction + segmentation loss (the ncntm recipe).
+
+The model is a **voxel-size super-resolver**:
+one shared backbone emits a single head on the fixed 4 nm network grid.
+The patch shape is the configured ``patch_size`` (pretrain
+``[256, 256, 256]``, joint 4B ``[400, 256, 256]``, 16B ``[200, 256, 256]``)::
+
+    head : [B, n_aff + 2, D, H, W]      # aff (logits) | sem (logit) | raw (linear)
+
+(Voxel-size convention used throughout: *small voxel size* = fine / high
+detail, e.g. 4 nm; *large voxel size* = coarse, e.g. 30-40 nm.)
+
+The ``raw`` channel is the reconstructed small-voxel EM.  ``aff`` / ``sem``
+are the small-voxel segmentation.  Every supervision term pools the
+small-voxel prediction down to the ground-truth tensor's spatial shape, so
+the pool factor follows that grid (factor 1 when the target is already on
+the small-voxel grid).
+
+Two branches, routed per **batch** by ``targets["task"]`` (batches must be
+task-homogeneous -- the datamodule's round-robin sampler, which also sets
+per-branch batch size).  A labeled rung is drawn in both branches; FIB-25
+(8 nm) is one such rung.
+
+``ssl``  -- self-supervised reconstruction.  The batched ``recon_image`` is
+    the augmented crop (one gamma for the whole crop) nearest-upsampled to
+    4 nm.  Resample average-pools ``raw`` onto the native resolution
+    ``recon_native_size`` (each native voxel is the mean of the 4 nm voxels
+    in its bin) and the L1 compares it to those augmented values.  A 4 nm
+    crop skips the resample.
+    No segmentation supervision.
+
+``sft``  -- segmentation, gated by labels: any labeled rung.  The
+    small-voxel head is pooled to the **label grid** (``labels.shape[-3:]``)
+    with :func:`~ncntm.utils.nearest.nearest_mean_pool` (each label voxel averages the small
+    voxels the input's nearest upsample filled from it, on z and on xy,
+    including fractional factors),
+    then :class:`~ncntm.losses.AffinityFGLoss`.  The head is
+    ``n_aff + 2`` channels (30 affinity offsets + sem + raw = 32 in the
+    training configs) and always carries ``raw``.  On sft the predicted
+    ``raw`` is also pooled to ``recon_image``: the clean native EM captured
+    before the input is resampled onto the 4 nm grid, then placed on the
+    coarser of native and fine.  That term is skipped when ``recon_image``
+    is absent.
+
+All branches **backprop jointly** into the shared backbone (no detach): the
+segmentation gradient shapes the reconstruction and vice-versa.
+
+Output dict (keys gated by the active branch / configured weights)::
+
+    loss              # global weighted total for this (homogeneous) batch
+    loss/recon        # reconstruction (ssl: main SR; sft: raw data-consistency)
+    loss/aff          # affinity segmentation (sft)
+    loss/sem          # foreground segmentation (sft)
+"""
+
+from __future__ import annotations
+
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
+
+import torch
+import torch.nn as nn
+
+from ncntm.losses.affinity import AffinityFGLoss
+from ncntm.losses._common import regression_loss_fn
+from ncntm.losses.var import residual_components, scale_factors, scale_supported
+from ncntm.utils.nearest import nearest_mean_pool, nearest_source
+
+# Canonical branch names.  A batch carries exactly one of these in
+# ``targets["task"]`` (the datamodule's sampler yields task-homogeneous
+# batches):
+#   * SSL -- self-supervised reconstruction of the clean EM (on the coarser
+#     of native and the 4 nm grid) from a degraded input (gated by voxel
+#     size: any rung fine enough; labels optional).  Owns the ``raw`` term.
+#   * SFT  -- segmentation on any *labeled* rung (gated by *labels*): pool the
+#     small-voxel head down to the label grid, then the affinity + sem loss.  A
+#     rung with labels does SFT regardless of where it sits on the ladder; the
+#     pool factor is derived from the labels (1 = the smallest-voxel case).
+SSL = "ssl"
+SFT = "sft"
+_TASKS = (SSL, SFT)
+
+
+def _as_channeled(x: torch.Tensor, ndim: int) -> torch.Tensor:
+    """Ensure a singleton channel axis so ``x`` has ``ndim`` dims.
+
+    Accepts a recon target as either ``[B, D, H, W]`` or
+    ``[B, 1, D, H, W]`` and returns the ``[B, 1, D, H, W]`` form.
+    """
+    if x.dim() == ndim - 1:
+        return x.unsqueeze(1)
+    return x
+
+
+def _nearest_gather_index(native: int, fine: int, device: torch.device) -> torch.Tensor:
+    """Output index whose nearest-upsample source is each native index.
+
+    Matches ``F.interpolate(..., mode="nearest")``: source
+    ``min(floor(dst * native / fine), native - 1)`` with a float32 scale.
+    """
+    native = int(native)
+    fine = int(fine)
+    if native == fine:
+        return torch.arange(native, device=device)
+    if native > fine or native < 1 or fine < 1:
+        raise ValueError(
+            f"native size {native} must lie in 1..{fine} to undo a nearest upsample."
+        )
+    src = nearest_source(native, fine)
+    first = torch.full((native,), -1, dtype=torch.long)
+    first[src.flip(0)] = torch.arange(fine - 1, -1, -1)
+    if bool((first < 0).any()):
+        raise RuntimeError(
+            f"nearest upsample from {native} to {fine} does not cover every native index."
+        )
+    return first.to(device)
+
+
+def _native_from_nearest(vol: torch.Tensor, native: Sequence[int]) -> torch.Tensor:
+    """Read the native voxels back out of a nearest-upsampled ``[N,C,D,H,W]``."""
+    fine = vol.shape[-3:]
+    idx = [
+        _nearest_gather_index(int(n), int(f), vol.device)
+        for n, f in zip(native, fine)
+    ]
+    return vol[:, :, idx[0]][:, :, :, idx[1]][:, :, :, :, idx[2]]
+
+
+class Joint3DReconSegLoss(nn.Module):
+    """Two-branch joint EM reconstruction + segmentation loss.
+
+    Training configs use a 32-channel head (30 affinity offsets + sem + raw)
+    and ``recon_loss="l1"``.  Pretrain
+    (``configs/pretrain.yaml``) sets ``weight_rec=1``,
+    ``weight_ssl=5``, ``weight_seg=0``, ``weight_sft=0``.  The constructor
+    defaults are the signature values.
+
+    Args:
+        seg: Either an already-built :class:`AffinityFGLoss` or a kwargs
+            mapping forwarded to it.  ``weight_raw`` on the inner loss is
+            **forced to 0** -- the EM reconstruction term is owned by this
+            module (so it can be applied / skipped per branch and target an
+            arbitrary EM grid, not the model input).  Everything else
+            (offsets, ``weight_aff`` / ``weight_sem`` and all the rebalancing
+            knobs) is passed straight through.
+        recon_loss: Regression family for the reconstruction term
+            (``l1`` / ``mse`` / ``smooth_l1``; default ``l1``).
+        weight_rec: Scalar weight on the reconstruction term.
+        weight_seg: Scalar weight on the segmentation term.
+        weight_ssl / weight_sft: Per-branch multipliers on that branch's
+            *total* (up/down-weight a whole branch independently of how often
+            its batches are drawn).
+        weight_dif: Weight of the rectified-flow velocity MSE relative to
+            the reconstruction L1, before the branch multiplier. ``1`` adds
+            the flow term at the same scale as ``weight_rec * L1``. The MSE
+            itself is computed by the wrapper (``proj_out``); this class only
+            stores the weight so every rank agrees on the logged key.
+        diffusion_steps: Euler steps for the ``pred/Euler`` reconstruction panel.
+            Training still draws one random ``t``; this is the comparison
+            integral only.
+        var: Optional mapping. ``enabled: true`` replaces the pooled
+            reconstruction L1 with residual next-scale L1 (VAR, coarse to
+            fine). ``scales_nm`` ends at ``fine_nm`` (4). The raw head stays
+            the 4 nm sum of those scales. A scale is scored only when the
+            sample was measured at least that finely; a coarser sample keeps
+            the native-pool L1 so it is not matched to a 4 nm target it does
+            not have. Omit ``var`` or set ``enabled: false`` for the pooled L1.
+        recon_image_key: Batch key holding the clean EM reconstruction target
+            (default ``"recon_image"``).  On ``ssl`` it is required and lives
+            on the coarser of the native voxel size and the 4 nm grid.  On
+            ``sft`` it is the clean native EM captured before the input is
+            resampled to the fine grid, then placed on that same coarser
+            grid (optional; the data-consistency term is skipped when the
+            key is absent).
+        task_key: Batch key holding the branch name (default ``"task"``).
+
+    The pool factor is **derived from the ground-truth shape** -- the small-
+    voxel head is pooled to ``labels.shape[-3:]`` (and ``raw`` to
+    ``recon_image.shape[-3:]``) -- so no explicit voxel-count key is needed and
+    the pool can never disagree with the target grid (``pool factor == 1`` when
+    the GT is already on the small-voxel grid).
+    """
+
+    def __init__(
+        self,
+        seg: Union[AffinityFGLoss, Mapping[str, Any], None] = None,
+        *,
+        recon_loss: str = "l1",
+        weight_rec: float = 1.0,
+        weight_seg: float = 1.0,
+        weight_ssl: float = 1.0,
+        weight_sft: float = 1.0,
+        weight_dif: float = 1.0,
+        diffusion_steps: int = 1,
+        var: Optional[Mapping[str, Any]] = None,
+        recon_image_key: str = "recon_image",
+        task_key: str = "task",
+    ) -> None:
+        super().__init__()
+
+        if isinstance(seg, AffinityFGLoss):
+            self.seg = seg
+        else:
+            seg_kw = dict(seg or {})
+            # The reconstruction term is owned here, not by the inner affinity
+            # loss (whose ``raw`` term reconstructs the *input*).
+            seg_kw["weight_raw"] = 0.0
+            self.seg = AffinityFGLoss(**seg_kw)
+
+        self._recon_fn = regression_loss_fn(recon_loss)
+        self.recon_loss = recon_loss
+        self.weight_rec = float(weight_rec)
+        self.weight_seg = float(weight_seg)
+        self.weight_ssl = float(weight_ssl)
+        self.weight_sft = float(weight_sft)
+        self.weight_dif = float(weight_dif)
+        self.diffusion_steps = int(diffusion_steps)
+        self._var_factors: Optional[Tuple[int, ...]] = None
+        self._var_fine_nm = 4.0
+        if var is not None and bool(var.get("enabled", False)):
+            self._var_fine_nm = float(var.get("fine_nm", 4.0))
+            scales = var.get("scales_nm", (32.0, 16.0, 8.0, 4.0))
+            self._var_factors = scale_factors(scales, self._var_fine_nm)
+
+        self.recon_image_key = str(recon_image_key)
+        self.task_key = str(task_key)
+
+        # Delegate the canonical channel layout so every consumer
+        # (Lightning module, image logger, Mutex Watershed) keys off this
+        # loss exactly as it does off ``AffinityFGLoss``.
+        self.offsets = self.seg.offsets
+        self.n_pull = self.seg.n_pull
+        self.n_aff = self.seg.n_aff
+        self.aff_slice = self.seg.aff_slice
+        self.sem_slice = self.seg.sem_slice
+        self.raw_slice = self.seg.raw_slice
+        self.head_channels = self.seg.head_channels
+        self.num_channels = self.seg.num_channels
+
+    # ------------------------------------------------------------------
+    # Target / key helpers
+    # ------------------------------------------------------------------
+
+    @torch.no_grad()
+    def build_targets(
+        self,
+        labels: torch.Tensor,
+        batch: Optional[Dict[str, torch.Tensor]] = None,
+    ) -> Dict[str, torch.Tensor]:
+        """Build the cached affinity target at the **supervised grid**.
+
+        Delegates to :meth:`AffinityFGLoss.build_targets`.  ``labels`` stays
+        on the rung's native grid; the head is pooled to that shape in
+        :meth:`forward`, so the target is built from the labels as-is.
+        """
+        return self.seg.build_targets(labels, batch)
+
+    def canonical_loss_keys(self) -> List[str]:
+        """Deterministic loss-dict keys for the cross-rank eval reduction.
+
+        Returns the union over branches (gated only by configured weights,
+        never by batch content) so the key set is identical on every
+        DDP/FSDP rank regardless of which branch a rank happens to draw.
+        """
+        keys: List[str] = ["loss"]
+        if self.weight_rec > 0:
+            keys.append("loss/recon")
+        if self.weight_dif > 0:
+            keys.append("loss/field")
+        if self.weight_seg > 0 and self.seg.weight_aff > 0:
+            keys.append("loss/aff")
+        if self.weight_seg > 0 and self.seg.weight_sem > 0:
+            keys.append("loss/sem")
+        return keys
+
+    def _resolve_task(self, task: Any) -> str:
+        """Normalise ``targets['task']`` to a single branch name.
+
+        Accepts a plain string or a per-sample sequence/tensor of strings;
+        a per-sample form must be homogeneous (the multi-task sampler
+        guarantees this).  Anything mixed is a configuration error.
+        """
+        if isinstance(task, str):
+            name = task
+        elif isinstance(task, (list, tuple)):
+            uniq = set(map(str, task))
+            if len(uniq) != 1:
+                raise ValueError(
+                    f"Joint3DReconSegLoss expects task-homogeneous batches; "
+                    f"got mixed tasks {sorted(uniq)}.  Use the round-robin "
+                    f"multi-task sampler so each batch is a single branch."
+                )
+            name = next(iter(uniq))
+        else:
+            raise TypeError(
+                f"targets['{self.task_key}'] must be a str or a homogeneous "
+                f"sequence of str; got {type(task).__name__}."
+            )
+        if name not in _TASKS:
+            raise ValueError(
+                f"Unknown task {name!r}; expected one of {_TASKS}."
+            )
+        return name
+
+    # ------------------------------------------------------------------
+    # Branch losses
+    # ------------------------------------------------------------------
+
+    def _recon_term(
+        self, head: torch.Tensor, recon_image: torch.Tensor,
+        native_size: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """``L1`` (or configured) on the ``raw`` channel vs the clean EM.
+
+        Resample average-pools the 4 nm ``raw`` channel onto the native
+        resolution, so each native voxel is the mean of the 4 nm voxels in
+        its bin. A crop that is already 4 nm skips that resample. When
+        ``native_size`` is set,
+        ``recon_image`` is the augmented crop nearest-upsampled to 4 nm
+        and those values are read back off that cube.
+        """
+        target = _as_channeled(recon_image, head.dim()).to(torch.float32)
+        raw = head[:, self.raw_slice]
+        if native_size is not None:
+            if tuple(target.shape[-3:]) != tuple(raw.shape[-3:]):
+                raise ValueError(
+                    "recon_image must be nearest-upsampled to the 4 nm head "
+                    f"{tuple(raw.shape[-3:])}; got {tuple(target.shape[-3:])}."
+                )
+            if self._var_factors is not None:
+                return self._var_l1_each(raw, target, native_size).mean()
+            return self._native_pool_l1(raw, target, native_size)
+        if self._var_factors is not None:
+            native = torch.tensor(raw.shape[-3:], device=raw.device)
+            return self._var_l1_each(raw, target, native).mean()
+        raw = self._pool_to(raw, target.shape[-3:])
+        return self._recon_fn(raw.float(), target.detach())
+
+    def _native_pool_l1(
+        self, raw: torch.Tensor, target: torch.Tensor, native_size: torch.Tensor,
+    ) -> torch.Tensor:
+        """Average-pool each 4 nm prediction to its native crop and take L1.
+
+        ``target`` is the nearest repeat of that crop. Samples in one batch
+        may have different native shapes after a zyx permutation. A native
+        size equal to the 4 nm grid is compared directly.
+        """
+        return self._l1_each(raw, target, native_size).mean()
+
+    def _l1_each(
+        self, raw: torch.Tensor, target: torch.Tensor, native_size: torch.Tensor,
+    ) -> torch.Tensor:
+        """Per-sample native-pool L1. :meth:`_native_pool_l1` is the mean."""
+        if native_size.dim() == 1:
+            native_size = native_size.unsqueeze(0).expand(raw.shape[0], -1)
+        fine = tuple(int(s) for s in raw.shape[-3:])
+        losses = []
+        for i in range(raw.shape[0]):
+            nat = tuple(int(v) for v in native_size[i].tolist())
+            pred = raw[i:i + 1].float()
+            tgt = target[i:i + 1].float()
+            if nat != fine:
+                pred = self._pool_to(pred, nat)
+                tgt = _native_from_nearest(tgt, nat)
+            losses.append(self._recon_fn(pred, tgt.detach()))
+        return torch.stack(losses)
+
+    def _var_l1_each(
+        self, raw: torch.Tensor, target: torch.Tensor, native_size: torch.Tensor,
+    ) -> torch.Tensor:
+        """Per-sample residual next-scale L1. The last scale is 4 nm.
+
+        A 4 nm crop is scored on every scale, including that residual. A
+        coarser crop keeps the native-pool L1 and any coarser scale it
+        supports. The raw channel is the 4 nm sum either way.
+        """
+        assert self._var_factors is not None
+        if native_size.dim() == 1:
+            native_size = native_size.unsqueeze(0).expand(raw.shape[0], -1)
+        factors = self._var_factors
+        fine_nm = self._var_fine_nm
+        losses = []
+        for i in range(raw.shape[0]):
+            pred = raw[i:i + 1].float()
+            tgt = target[i:i + 1].float()
+            nat = tuple(int(v) for v in native_size[i].tolist())
+            fine = tuple(int(s) for s in pred.shape[-3:])
+            pred_parts = residual_components(pred, factors)
+            tgt_parts = residual_components(tgt.detach(), factors)
+            at_4nm = scale_supported(nat, fine, fine_nm, fine_nm)
+            terms = []
+            if at_4nm:
+                # Every scale, including the 4 nm residual. Their sum is the
+                # 4 nm image, so this supervises that reconstruction.
+                for part_p, part_t, factor in zip(pred_parts, tgt_parts, factors):
+                    if scale_supported(nat, fine, fine_nm * factor, fine_nm):
+                        terms.append(self._recon_fn(part_p, part_t))
+            else:
+                # Keep the measured voxels, and any coarser scale the sample
+                # fully supports. The 4 nm residual stays in the raw head and
+                # is not matched to a target this sample does not have.
+                if nat != fine:
+                    pred_n = self._pool_to(pred, nat)
+                    tgt_n = _native_from_nearest(tgt, nat)
+                else:
+                    pred_n, tgt_n = pred, tgt
+                terms.append(self._recon_fn(pred_n, tgt_n.detach()))
+                for part_p, part_t, factor in zip(pred_parts, tgt_parts, factors):
+                    if factor == 1:
+                        continue
+                    if scale_supported(nat, fine, fine_nm * factor, fine_nm):
+                        terms.append(self._recon_fn(part_p, part_t))
+            losses.append(torch.stack(terms).mean())
+        return torch.stack(losses)
+
+    def l1_per_sample(
+        self,
+        pred: torch.Tensor,
+        recon_image: torch.Tensor,
+        native_size: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Per-sample reconstruction L1, pooled the same way as the loss.
+
+        ``pred`` is the full head (the raw channel is sliced) or a volume
+        that already has the target's channel count, in the head's value
+        range. One L1 is returned per batch row.
+        """
+        target = _as_channeled(recon_image, pred.dim()).to(torch.float32)
+        if pred.shape[1] == target.shape[1]:
+            raw = pred
+        else:
+            raw = pred[:, self.raw_slice]
+        if native_size is not None:
+            if tuple(target.shape[-3:]) != tuple(raw.shape[-3:]):
+                raise ValueError(
+                    "recon_image must be nearest-upsampled to the 4 nm head "
+                    f"{tuple(raw.shape[-3:])}; got {tuple(target.shape[-3:])}."
+                )
+            if self._var_factors is not None:
+                return self._var_l1_each(raw, target, native_size)
+            return self._l1_each(raw, target, native_size)
+        if self._var_factors is not None:
+            native = torch.tensor(raw.shape[-3:], device=raw.device)
+            return self._var_l1_each(raw, target, native)
+        raw = self._pool_to(raw, target.shape[-3:])
+        return (raw.float() - target.detach()).abs().flatten(1).mean(dim=1)
+
+    def _seg_terms(
+        self,
+        head: torch.Tensor,
+        labels: torch.Tensor,
+        cached: Optional[Dict[str, torch.Tensor]],
+        sem_label: Optional[torch.Tensor] = None,
+    ) -> Dict[str, torch.Tensor]:
+        """Run the inner affinity+sem loss on ``head`` at the label grid.
+
+        ``sem_label`` (the boundary-eroded foreground from the datamodule's
+        ``boundary_target: semantic`` mode) supervises the sem head only; the
+        affinity target always uses the pristine instance ``labels``.
+        """
+        sub_targets: Dict[str, Any] = {"labels": labels}
+        if cached is not None:
+            sub_targets["_cached_targets"] = cached
+        if sem_label is not None:
+            if sem_label.shape[-3:] != labels.shape[-3:]:
+                raise ValueError(
+                    "sem_label spatial shape "
+                    f"{tuple(sem_label.shape[-3:])} must match labels "
+                    f"{tuple(labels.shape[-3:])} (sem_label stays on the "
+                    "native label grid; the head is pooled to match)."
+                )
+            sub_targets["sem_label"] = sem_label
+        out = self.seg(head, sub_targets)
+        # Drop the inner total (``loss``); this module rebuilds the total.
+        return {k: v for k, v in out.items() if k != "loss"}
+
+    @staticmethod
+    def _pool_to(x: torch.Tensor, shape: Sequence[int]) -> torch.Tensor:
+        """Average-pool a small-voxel volume down to the native ``(d, h, w)``.
+
+        Each native voxel is the mean of the 4 nm voxels the input's nearest
+        upsample filled from it (:func:`~ncntm.utils.nearest.nearest_mean_pool`), on every axis,
+        so larger-voxel *xy* rungs (MICrONS / FIB at 8 nm) pool in-plane too.
+        A no-op when ``x`` is already at ``shape`` (the smallest-voxel rung /
+        pool factor 1).
+        """
+        target = tuple(int(s) for s in shape)
+        if tuple(x.shape[-3:]) == target:
+            return x
+        return nearest_mean_pool(x, target)
+
+    # ------------------------------------------------------------------
+    # Forward
+    # ------------------------------------------------------------------
+
+    def forward(
+        self,
+        head: torch.Tensor,
+        targets: Dict[str, Any],
+    ) -> Dict[str, torch.Tensor]:
+        """Route the (task-homogeneous) batch to its branch and aggregate.
+
+        Args:
+            head: ``[B, n_aff + 2, D, H, W]`` small-voxel head (aff/sem
+                logits, raw linear) on the fixed 4 nm network grid.
+            targets: Must carry ``task``.  ``ssl`` carries ``recon_image``
+                (the clean EM target, on the 4 nm grid for COSEM or on the
+                native grid when that is coarser, e.g. FIB 8 nm).  ``sft``
+                carries ``labels`` at the native grid -- the pool factor is
+                read from the label shape, so no voxel-count key is needed --
+                and optionally ``recon_image`` (clean native EM on the coarser
+                of native and fine) for the ``raw`` data-consistency term, and
+                optionally ``sem_label`` (boundary-eroded foreground on the
+                label grid; supervises the sem head only --
+                ``boundary_target: semantic``).
+                ``_cached_targets`` (from :meth:`build_targets`) is used when
+                present.
+
+        Returns:
+            ``ssl`` -> ``{"loss", "loss/recon"}``;
+            ``sft``  -> ``{"loss", "loss/aff", "loss/sem", ["loss/recon"]}``.
+        """
+        if head.shape[1] != self.head_channels:
+            raise ValueError(
+                f"Joint3DReconSegLoss expects a {self.head_channels}-channel "
+                f"head (n_aff + 2); got {head.shape[1]}."
+            )
+        task = self._resolve_task(targets[self.task_key])
+        cached: Optional[Dict[str, torch.Tensor]] = targets.get("_cached_targets")
+        out: Dict[str, torch.Tensor] = {}
+        total = head.new_zeros(())
+
+        recon_image = targets.get(self.recon_image_key)
+        native_size = targets.get("recon_native_size")
+
+        if task == SSL:
+            # ---- self-supervised reconstruction of the clean EM ----
+            # Match ``raw`` (pooled to the recon grid) to ``recon_image``.
+            # ``recon_image`` is REQUIRED (it is the only supervision on this
+            # label-free branch).
+            if recon_image is None:
+                raise KeyError(
+                    f"Joint3DReconSegLoss[ssl] needs targets"
+                    f"['{self.recon_image_key}'] (the clean EM reconstruction "
+                    f"target)."
+                )
+            if self.weight_rec > 0:
+                l_recon = self._recon_term(head, recon_image, native_size)
+                out["loss/recon"] = l_recon
+                total = total + self.weight_rec * l_recon
+            branch_w = self.weight_ssl
+        else:
+            # ---- segmentation on a labeled rung ----
+            # Pool the small-voxel head down to the LABEL grid (factor derived
+            # from the label shape; a no-op when labels are already small-voxel).
+            labels = targets["labels"]
+            if self.weight_seg > 0:
+                seg_head = self._pool_to(head, labels.shape[-3:])
+                seg = self._seg_terms(seg_head, labels, cached, targets.get("sem_label"))
+                for k, v in seg.items():
+                    out[k] = v
+                    total = total + self.weight_seg * v
+            # Data-consistency on the ``raw`` head (the unified head always
+            # carries it).  Pool the predicted small-voxel ``raw`` to
+            # ``recon_image`` (clean native EM on the coarser of native and
+            # fine) and match it, so the super-resolved volume agrees with
+            # the measured data after that downsample.  Optional (skipped
+            # when the datamodule omits ``recon_image``).
+            if recon_image is not None and self.weight_rec > 0:
+                l_recon = self._recon_term(head, recon_image, native_size)
+                out["loss/recon"] = l_recon
+                total = total + self.weight_rec * l_recon
+            branch_w = self.weight_sft
+
+        out["loss"] = branch_w * total
+        return out
+
+    def __repr__(self) -> str:
+        return (
+            f"{self.__class__.__name__}(seg={self.seg!r}, "
+            f"recon_loss={self.recon_loss}, weight_rec={self.weight_rec}, "
+            f"weight_seg={self.weight_seg}, weight_ssl={self.weight_ssl}, "
+            f"weight_sft={self.weight_sft}, weight_dif={self.weight_dif}, "
+            f"diffusion_steps={self.diffusion_steps}, "
+            f"var_factors={self._var_factors})"
+        )
+
+
+__all__ = ["Joint3DReconSegLoss", "SSL", "SFT"]

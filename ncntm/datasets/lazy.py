@@ -1,0 +1,828 @@
+"""
+Lazy-loading dataset for 3D volumetric connectomics data.
+
+Reads only the requested patch from disk on each __getitem__ call,
+keeping system memory usage constant regardless of volume count/size.
+Designed for DDP training where each rank would otherwise load full
+volumes, exhausting system RAM.
+
+Supports HDF5 (chunked reads) and TIFF (memory-mapped reads).
+File handles are cached per worker to avoid the overhead of opening
+and closing HDF5 files on every sample.
+"""
+
+import logging
+import threading
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional, Tuple
+
+import numpy as np
+import torch
+from torch.utils.data import Dataset
+
+logger = logging.getLogger(__name__)
+
+_thread_local = threading.local()
+
+
+class _VolumeHandle:
+    """Lightweight metadata handle for a single volume — no data in RAM."""
+
+    __slots__ = ("image_path", "label_path", "image_key", "label_key",
+                 "shape", "name", "prompt", "dataset")
+
+    def __init__(
+        self,
+        image_path: Path,
+        label_path: Optional[Path],
+        shape: Tuple[int, ...],
+        name: str,
+        image_key: Optional[str] = None,
+        label_key: Optional[str] = None,
+        prompt: Optional[str] = None,
+        dataset: Optional[str] = None,
+    ) -> None:
+        self.image_path = image_path
+        self.label_path = label_path
+        self.image_key = image_key
+        self.label_key = label_key
+        self.shape = shape
+        self.name = name
+        self.prompt = prompt
+        self.dataset = dataset
+
+
+def _resolve_hdf5_key(path: Path) -> Optional[str]:
+    """Find the first dataset key in an HDF5 file without loading data."""
+    import h5py
+    with h5py.File(str(path), "r", locking=False) as f:
+        for k in ("main", "data", "raw", "volume", "image", "label"):
+            if k in f:
+                return k
+        for k in f.keys():
+            if isinstance(f[k], h5py.Dataset):
+                return k
+    return None
+
+
+def _get_shape(path: Path, key: Optional[str] = None) -> Tuple[int, ...]:
+    """Read volume shape from file metadata without loading data."""
+    suffix = path.suffix.lower()
+    if suffix in (".h5", ".hdf5"):
+        import h5py
+        if key is None:
+            key = _resolve_hdf5_key(path)
+        with h5py.File(str(path), "r", locking=False) as f:
+            return tuple(f[key].shape)
+    elif suffix in (".tif", ".tiff"):
+        import tifffile
+        with tifffile.TiffFile(str(path)) as tif:
+            series = tif.series[0]
+            return tuple(series.shape)
+    else:
+        raise ValueError(f"Unsupported file format: {suffix}")
+
+
+# HDF5 chunk cache size, per open file, per worker thread.  The h5py
+# default is 1 MB which is much smaller than typical EM volume chunks
+# (gzip-compressed minnie65 chunks are ~1-16 MB each), so bumping it lets
+# random patches drawn close together inside one volume hit the
+# decompressed-chunk cache and avoid repeated zlib decompression.
+#
+# MEMORY: this is a HOST-RAM cost of ``rdcc_nbytes`` *per open file, per
+# worker*.  With ``balance: volume`` (one volume per batch) and
+# ``persistent_workers: true``, a naive unbounded handle cache grows toward
+# ``num_volumes * rdcc_nbytes * num_workers`` as each worker progressively
+# opens every file over epochs (~150 GB on the 4B recipe with the old 128 MB).
+# We therefore (a) keep rdcc modest at 32 MB and (b) LRU-bound the number of
+# open handles per worker to ``_H5_MAX_OPEN_HANDLES`` -- so the footprint is
+# capped at ~``K * rdcc_nbytes`` per worker (~256 MB) instead of unbounded.
+_H5_CHUNK_CACHE_BYTES = 32 * 1024 * 1024    # 32 MB (was 128 MB; see note above)
+_H5_CHUNK_CACHE_NSLOTS = 10007              # prime, h5py-recommended
+# Max HDF5 handles kept open per worker thread.  A volume-balanced batch reads
+# one volume (image [+ seg]) at a time, so a small hot set is plenty; the LRU
+# closes the least-recently-used file when the cap is exceeded.
+_H5_MAX_OPEN_HANDLES = 8
+
+
+def _get_h5_handle(path: str):
+    """Return a cached HDF5 file handle for the current worker thread.
+
+    Handles live in a per-thread LRU (``OrderedDict``) capped at
+    ``_H5_MAX_OPEN_HANDLES``: on overflow the least-recently-used file is
+    closed and its cached dataset objects dropped, so the per-worker HDF5
+    chunk-cache memory stays bounded (~``K * rdcc_nbytes``) instead of growing
+    toward ``num_volumes * rdcc_nbytes`` under persistent workers.
+
+    The chunk cache is sized via ``rdcc_nbytes`` / ``rdcc_nslots`` so repeated
+    reads from neighbouring regions of the same volume do not re-decompress
+    chunks.
+    """
+    import h5py
+    from collections import OrderedDict
+    cache = getattr(_thread_local, "h5_cache", None)
+    if cache is None:
+        cache = OrderedDict()
+        _thread_local.h5_cache = cache
+    handle = cache.get(path)
+    if handle is not None:
+        cache.move_to_end(path)                 # mark most-recently-used
+        return handle
+    handle = h5py.File(
+        path, "r", swmr=True, locking=False,
+        rdcc_nbytes=_H5_CHUNK_CACHE_BYTES,
+        rdcc_nslots=_H5_CHUNK_CACHE_NSLOTS,
+    )
+    cache[path] = handle
+    cache.move_to_end(path)
+    # Evict least-recently-used handles beyond the cap.
+    while len(cache) > _H5_MAX_OPEN_HANDLES:
+        old_path, old_handle = cache.popitem(last=False)
+        ds_cache = getattr(_thread_local, "h5_ds_cache", None)
+        if ds_cache is not None:
+            for ck in [k for k in ds_cache if k[0] == old_path]:
+                del ds_cache[ck]
+        try:
+            old_handle.close()
+        except Exception:  # noqa: BLE001 -- best-effort close of an evicted file
+            pass
+    return handle
+
+
+def _get_h5_dataset(path: str, key: str):
+    """Return a cached ``h5py.Dataset`` object for the current worker thread.
+
+    h5py resolves ``f[key]`` on every access; for a hot read loop that cost is
+    non-zero.  Caching the dataset object eliminates that lookup so each
+    ``__getitem__`` falls straight into the chunked-read path.
+
+    Always fetches the handle first, which refreshes its LRU position -- so a
+    frequently-read dataset never has its underlying file evicted out from
+    under it (a cached dataset object bound to a closed handle would raise).
+    Evicted paths have their dataset entries purged in ``_get_h5_handle``, so a
+    reopened file re-resolves ``f[key]`` against the fresh handle.
+    """
+    ds_cache = getattr(_thread_local, "h5_ds_cache", None)
+    if ds_cache is None:
+        ds_cache = {}
+        _thread_local.h5_ds_cache = ds_cache
+    f = _get_h5_handle(path)                     # refresh handle LRU (keeps hot file open)
+    ck = (path, key)
+    ds = ds_cache.get(ck)
+    if ds is None:
+        ds = f[key]
+        ds_cache[ck] = ds
+    return ds
+
+
+def _get_tiff_memmap(path: str):
+    """Return a cached ``tifffile.memmap`` array for the current worker thread.
+
+    ``tifffile.memmap`` parses the TIFF directory and sets up an
+    ``np.memmap`` on every call; for hot patch reads we want to do that
+    exactly once per worker.
+    """
+    cache = getattr(_thread_local, "tiff_cache", None)
+    if cache is None:
+        cache = {}
+        _thread_local.tiff_cache = cache
+    arr = cache.get(path)
+    if arr is None:
+        import tifffile
+        arr = tifffile.memmap(path)
+        cache[path] = arr
+    return arr
+
+
+def _read_patch(
+    path: Path,
+    slices: Tuple[slice, ...],
+    key: Optional[str] = None,
+    dtype: Optional[np.dtype] = None,
+) -> np.ndarray:
+    """Read a spatial patch from disk without loading the full volume."""
+    suffix = path.suffix.lower()
+    if suffix in (".h5", ".hdf5"):
+        if key is None:
+            key = _resolve_hdf5_key(path)
+        ds = _get_h5_dataset(str(path), key)
+        data = ds[slices]
+        if dtype is not None:
+            data = data.astype(dtype)
+        return data
+    elif suffix in (".tif", ".tiff"):
+        arr = _get_tiff_memmap(str(path))
+        data = np.array(arr[slices])
+        if dtype is not None:
+            data = data.astype(dtype)
+        return data
+    else:
+        raise ValueError(f"Unsupported file format: {suffix}")
+
+
+def _find_file(search_dir: Path, base_name: str) -> Optional[Path]:
+    """Find a volume file by base name with common extensions."""
+    for ext in (".h5", ".hdf5", ".tif", ".tiff"):
+        candidate = search_dir / f"{base_name}{ext}"
+        if candidate.exists():
+            return candidate
+    for d in search_dir.iterdir():
+        if d.is_dir() and d.name == base_name:
+            for ext in (".h5", ".hdf5", ".tif", ".tiff"):
+                for f in d.rglob(f"*{ext}"):
+                    return f
+    return None
+
+
+class LazyVolDataset(Dataset):
+    """Memory-efficient dataset that reads 3D patches on-demand from disk.
+
+    Instead of loading entire volumes into RAM, this dataset stores only
+    file paths and volume shapes (~bytes per volume). Each ``__getitem__``
+    reads a random patch directly from the HDF5/TIFF file using sliced
+    I/O, materializing only the patch_size crop in memory.
+
+    Memory usage: O(num_volumes × metadata) ≈ negligible
+    vs. CacheDataset: O(num_volumes × volume_size) ≈ GBs
+
+    Args:
+        root_dir: Root directory containing data files.
+        volumes: List of volume dicts.  ``vol`` is required; ``seg``,
+            ``root``, and ``prompt`` are optional.
+        patch_size: Spatial crop size ``(D, H, W)`` for random patches.
+        transform: MONAI transform pipeline to apply to each patch.
+        num_samples: Virtual epoch length (random patches per epoch).
+        normalize: Whether to normalize images to [0, 1] using per-volume
+            min/max from a few centred probes, cached in a ``.norm.json``
+            sidecar.
+        deterministic: When True, seed per-sample RNG by index so crops /
+            volume picks are reproducible (used for validation groups).
+        min_foreground: Minimum fraction of non-zero voxels in the label
+            patch.  When > 0, patches below this threshold are rejected
+            and re-sampled (up to ``max_foreground_retries`` attempts).
+            Only applies to volumes that have a label (segmentation).
+        image_min_foreground: Minimum fraction of non-zero voxels in the
+            *image* patch.  For **label-less** volumes (e.g. SSL) it is the
+            sole gate.  For **labeled** volumes it is an *additional* gate
+            applied on top of ``min_foreground`` (the crop must pass both),
+            so zero-padded EM is rejected alongside background-heavy labels.
+            When > 0, failing crops are re-sampled.
+        image_min_std: Local-block standard-deviation threshold on the
+            per-volume [0, 1] crop (label-less volumes).  A crop passes when
+            the fraction of ``(4, 16, 16)`` blocks whose std exceeds this
+            value is at least ``image_min_foreground``, or 0.5 when that
+            gate is off.  0 disables the block test.
+        image_min_autocorr: Minimum lag-1 in-plane autocorrelation of the
+            [0, 1] crop (label-less volumes).  Rejects noise-dominated
+            crops that clear the block-std gate.  0 disables it.
+        min_instances: Minimum number of distinct nonzero instance ids in
+            a labeled crop.  0 disables the gate.
+        max_inst_frac: Maximum fraction of the labeled foreground that the
+            single largest instance may occupy.  0 disables the gate.
+        max_foreground_retries: Maximum re-sampling attempts before
+            falling back to the best-seen crop (highest gate score across
+            the attempts).
+        volume_sampling: ``"voxels"`` picks a volume in proportion to its
+            voxel count (the historical behaviour). ``"uniform"`` picks
+            each volume with equal probability.
+        quiet: Skip the discovery log line. Dataset-balance setup builds
+            each group once to learn its shape, then sets ``num_samples``.
+    """
+
+    def __init__(
+        self,
+        root_dir: str,
+        volumes: List[Dict[str, str]],
+        patch_size: Tuple[int, int, int],
+        transform: Optional[Callable] = None,
+        num_samples: int = 16000,
+        normalize: bool = True,
+        deterministic: bool = False,
+        min_foreground: float = 0.0,
+        image_min_foreground: float = 0.0,
+        image_min_std: float = 0.0,
+        image_min_autocorr: float = 0.0,
+        min_instances: int = 0,
+        max_inst_frac: float = 0.0,
+        max_foreground_retries: int = 50,
+        volume_sampling: str = "voxels",
+        quiet: bool = False,
+    ) -> None:
+        super().__init__()
+        self.root_dir = Path(root_dir)
+        self.patch_size = patch_size
+        self.transform = transform
+        self.deterministic = deterministic
+        self.num_samples = num_samples
+        self.normalize = normalize
+        self.min_foreground = float(min_foreground)
+        self.image_min_foreground = float(image_min_foreground)
+        # Local-block contrast gate (label-less volumes).  ``image_min_std``
+        # is the std threshold on the per-volume [0, 1] crop.  A crop passes
+        # when the fraction of (4, 16, 16) blocks above that threshold is at
+        # least ``image_min_foreground`` (0.5 when that gate is off).
+        # 0 = disabled.
+        self.image_min_std = float(image_min_std)
+        # Structure gate: reject NOISE-dominated crops (detector / resin grain)
+        # that pass the std/content gate because random noise has high local
+        # variance.  Measured as the lag-1 spatial autocorrelation on the
+        # per-volume [0, 1] scale: real ultrastructure is spatially coherent
+        # (~0.6-0.8), white noise is ~0.  0 = disabled.
+        self.image_min_autocorr = float(image_min_autocorr)
+        # Instance-diversity gate (labeled/sft volumes only): ``min_foreground``
+        # only checks the label's NON-ZERO fraction, so a crop entirely filled by
+        # ONE giant instance (e.g. a single dendrite trunk spanning the whole
+        # patch) passes trivially (label_frac ~1.0) yet gives AffinityFGLoss no
+        # "push" (inter-instance) signal at all -- only "pull". These two gates
+        # catch that case directly:
+        #   min_instances -- reject crops with fewer than N distinct nonzero
+        #                     instance ids (0 = disabled).
+        #   max_inst_frac -- reject crops where the single largest instance
+        #                     exceeds this fraction of the labeled foreground
+        #                     (0 = disabled).
+        self.min_instances = int(min_instances)
+        self.max_inst_frac = float(max_inst_frac)
+        self.max_foreground_retries = int(max_foreground_retries)
+        if volume_sampling not in ("voxels", "uniform"):
+            raise ValueError(
+                "volume_sampling must be 'voxels' or 'uniform'; "
+                f"got {volume_sampling!r}."
+            )
+        self.volume_sampling = str(volume_sampling)
+        self._quiet = bool(quiet)
+
+        self._handles: List[_VolumeHandle] = []
+        # Built during discovery, then converted to the ``_cum_voxels_arr``
+        # np.searchsorted table used for weighted volume picking; the list form
+        # is kept only as a debugging aid and is not read after conversion.
+        self._cum_voxels: List[int] = []
+        self._norm_params: Dict[str, Tuple[float, float]] = {}
+
+        self._discover_volumes(volumes)
+
+        if not self._handles:
+            raise ValueError(f"No volumes found in {root_dir}")
+
+        # Cache as a numpy array for O(log N) np.searchsorted in _pick_volume.
+        # Kept alongside the original list to preserve the public attribute.
+        self._cum_voxels_arr = np.asarray(self._cum_voxels, dtype=np.int64)
+
+        total = sum(np.prod(h.shape) for h in self._handles)
+        if not self._quiet:
+            logger.info(
+                "LazyVolDataset: %d volumes, %s total voxels, "
+                "patch_size=%s, num_samples=%d, min_fg=%.0f%%, img_min_fg=%.0f%%, "
+                "~%.1f MB metadata",
+                len(self._handles), f"{total:,}", patch_size, num_samples,
+                self.min_foreground * 100,
+                self.image_min_foreground * 100,
+                len(self._handles) * 0.001,
+            )
+
+    def _discover_volumes(self, volumes: List[Dict[str, str]]) -> None:
+        """Scan volume files and store metadata only — no data loaded."""
+        cumulative = 0
+        for vol_spec in volumes:
+            vol_root = Path(vol_spec.get("root", str(self.root_dir)))
+            vol_name = vol_spec["vol"]
+
+            img_path = _find_file(vol_root, vol_name)
+            if img_path is None:
+                logger.warning("Volume image not found: %s in %s", vol_name, vol_root)
+                continue
+
+            img_key = _resolve_hdf5_key(img_path) if img_path.suffix.lower() in (".h5", ".hdf5") else None
+            shape = _get_shape(img_path, img_key)
+
+            # Reject volumes smaller than the patch on any spatial axis: a
+            # crop there would silently return an undersized patch (no
+            # zero-padding in the lazy read path), breaking downstream
+            # shape contracts.  Skip with a clear warning instead.
+            spatial = (shape[1:] if len(shape) == len(self.patch_size) + 1
+                       else shape)
+            if any(s < p for s, p in zip(spatial, self.patch_size)):
+                logger.warning(
+                    "Skipping volume %s: spatial shape %s is smaller than "
+                    "patch_size %s on some axis.",
+                    vol_name, tuple(spatial), tuple(self.patch_size),
+                )
+                continue
+
+            seg_name = vol_spec.get("seg")
+            label_path = None
+            label_key = None
+            if seg_name:
+                label_path = _find_file(vol_root, seg_name)
+                if label_path is None:
+                    # A volume with ``seg`` configured is expected to be a
+                    # LABELED (sft) volume -- if the segmentation file can't
+                    # be found on disk, silently falling back to "label-less"
+                    # would make this volume masquerade as unlabeled while
+                    # the caller's transform pipeline (chosen by task, e.g.
+                    # Joint3DDataModule's sft branch) still requires "label",
+                    # crashing deep in a DataLoader worker with a cryptic
+                    # "Key `label` ... was missing" error instead of a clear
+                    # message here. Skip the volume entirely instead, same as
+                    # a missing image file above.
+                    logger.warning(
+                        "Volume segmentation not found: %s in %s "
+                        "(configured via 'seg' for image %s) -- skipping "
+                        "this volume entirely rather than silently treating "
+                        "it as label-less.",
+                        seg_name, vol_root, vol_name,
+                    )
+                    continue
+                if label_path.suffix.lower() in (".h5", ".hdf5"):
+                    label_key = _resolve_hdf5_key(label_path)
+
+            prompt = vol_spec.get("prompt")
+            dataset = vol_spec.get("dataset")
+            handle = _VolumeHandle(
+                image_path=img_path,
+                label_path=label_path,
+                shape=shape,
+                name=vol_name,
+                image_key=img_key,
+                label_key=label_key,
+                prompt=str(prompt) if prompt else None,
+                dataset=str(dataset) if dataset else None,
+            )
+            self._handles.append(handle)
+            cumulative += int(np.prod(shape))
+            self._cum_voxels.append(cumulative)
+
+        if self.normalize and self._handles:
+            self._compute_norm_params()
+
+    # ------------------------------------------------------------------
+    # Per-volume normalisation parameters
+    # ------------------------------------------------------------------
+    # Reads a handful of *small* centred patches (not full slices) to
+    # estimate min/max, then caches the result to a ``<file>.norm.json``
+    # sidecar so subsequent ranks / runs load instantly.  Full-slice
+    # sampling on chunked gzip HDF5 can take 10+ s per volume, which
+    # multiplied across ranks (setup runs per-rank) easily turns into a
+    # multi-minute hang before Lightning's sanity-check banner prints.
+    _NORM_PROBE_SIZE = 512      # ≤ a few MB per probe; trivial to decode
+    _NORM_PROBE_COUNT = 5       # how many probes to average min/max over
+
+    def _norm_cache_path(self, handle: _VolumeHandle) -> Path:
+        return handle.image_path.with_suffix(handle.image_path.suffix + ".norm.json")
+
+    def _read_norm_cache(self, handle: _VolumeHandle) -> Optional[Tuple[float, float]]:
+        import json
+        p = self._norm_cache_path(handle)
+        if not p.exists():
+            return None
+        try:
+            with open(p, "r") as f:
+                data = json.load(f)
+            return float(data["min"]), float(data["max"])
+        except (OSError, ValueError, KeyError, json.JSONDecodeError):
+            # OSError: race with concurrent writer / unreadable file.
+            # ValueError / json.JSONDecodeError: corrupted sidecar.
+            # KeyError: schema mismatch (older format).  In all cases
+            # we treat the cache as cold and force a recompute.
+            return None
+
+    def _write_norm_cache(self, handle: _VolumeHandle, vmin: float, vmax: float) -> None:
+        import json, os
+        p = self._norm_cache_path(handle)
+        tmp = p.with_suffix(p.suffix + ".tmp")
+        try:
+            with open(tmp, "w") as f:
+                json.dump({"min": vmin, "max": vmax}, f)
+            os.replace(tmp, p)
+        except OSError:
+            pass   # non-fatal: read-only filesystem, concurrent rank, etc.
+
+    def _compute_norm_params(self) -> None:
+        """Per-volume min/max from small centred probes with sidecar caching."""
+        probe = self._NORM_PROBE_SIZE
+        n_probes = self._NORM_PROBE_COUNT
+
+        for h in self._handles:
+            cached = self._read_norm_cache(h)
+            if cached is not None:
+                self._norm_params[h.name] = cached
+                logger.debug("Norm params cache hit for %s: %s", h.name, cached)
+                continue
+
+            spatial = self._spatial_shape(h)
+            has_channel = len(h.shape) > len(spatial)
+            z_dim = spatial[0]
+
+            z_indices = sorted(
+                set(
+                    max(0, min(i, z_dim - 1))
+                    for i in (0, z_dim // 4, z_dim // 2, 3 * z_dim // 4, z_dim - 1)
+                )
+            )[:n_probes]
+
+            vmin, vmax = float("inf"), float("-inf")
+            for zi in z_indices:
+                # Centred (probe × probe) crop at z=zi; orders of
+                # magnitude fewer chunks than a full-slice read.
+                sl = [slice(zi, zi + 1)]
+                for axis_len in spatial[1:]:
+                    half = min(probe, axis_len) // 2
+                    centre = axis_len // 2
+                    sl.append(slice(max(0, centre - half), min(axis_len, centre + half)))
+                sl_tuple = tuple(sl)
+                if has_channel:
+                    sl_tuple = (slice(None),) + sl_tuple
+                patch = _read_patch(h.image_path, sl_tuple, h.image_key, dtype=np.float32)
+                vmin = min(vmin, float(patch.min()))
+                vmax = max(vmax, float(patch.max()))
+
+            self._norm_params[h.name] = (vmin, vmax)
+            self._write_norm_cache(h, vmin, vmax)
+            logger.debug("Norm params for %s: min=%.4f, max=%.4f", h.name, vmin, vmax)
+
+    def _norm_scale(self, handle: _VolumeHandle) -> float:
+        """Per-volume intensity span ``vmax - vmin`` used to normalise std.
+
+        Falls back to ``1.0`` when norm params are unavailable or degenerate,
+        so the contrast gate degrades to a raw-intensity std test rather than
+        dividing by zero.
+        """
+        params = self._norm_params.get(handle.name)
+        if not params:
+            return 1.0
+        vmin, vmax = params
+        return (vmax - vmin) if vmax > vmin else 1.0
+
+    @staticmethod
+    def _content_fraction(
+        img01: np.ndarray, std_thr: float, block: Tuple[int, int, int] = (4, 16, 16),
+    ) -> float:
+        """Fraction of local blocks whose intensity std exceeds ``std_thr``.
+
+        ``img01`` is the crop normalised to [0, 1].  The crop is tiled into
+        ``block``-sized (z, y, x) bricks; a brick counts as "content" when its
+        std clears ``std_thr``.  This localises the contrast test so a crop that
+        is mostly flat (resin / empty embedding) scores low even if one corner
+        is textured.  Falls back to a single global-std test when the crop is
+        smaller than one block on any axis.
+        """
+        if img01.ndim > 3:                       # drop a leading channel dim
+            img01 = img01.reshape(img01.shape[-3:])
+        z, y, x = img01.shape[-3:]
+        bz, by, bx = min(block[0], z), min(block[1], y), min(block[2], x)
+        z2, y2, x2 = z - (z % bz), y - (y % by), x - (x % bx)
+        if z2 == 0 or y2 == 0 or x2 == 0:
+            return float(img01.std() >= std_thr)
+        bricks = (
+            img01[:z2, :y2, :x2]
+            .reshape(z2 // bz, bz, y2 // by, by, x2 // bx, bx)
+            .transpose(0, 2, 4, 1, 3, 5)
+            .reshape(-1, bz * by * bx)
+        )
+        return float(np.mean(bricks.std(axis=1) >= std_thr))
+
+    @staticmethod
+    def _lag1_autocorr(img01: np.ndarray) -> float:
+        """Lag-1 in-plane spatial autocorrelation of a crop (``[*, H, W]``).
+
+        Real EM ultrastructure is spatially coherent -- neighbouring voxels are
+        strongly correlated (~0.6-0.8) -- whereas detector / resin grain is
+        essentially white noise (~0).  Unlike a variance / std test, this
+        **rejects noise-dominated crops**: random grain has high local variance
+        and sails through the ``image_min_std`` content gate (measured:
+        content_frac 1.0, autocorr ~0.25), while genuine ultrastructure sits at
+        autocorr ~0.7.  A threshold near 0.5 cleanly separates the two.
+        """
+        x = img01.astype(np.float32)
+        x = x - x.mean()
+        den = float((x * x).mean()) + 1e-8
+        ay = float((x[..., :-1, :] * x[..., 1:, :]).mean())
+        ax = float((x[..., :, :-1] * x[..., :, 1:]).mean())
+        return 0.5 * (ay + ax) / den
+
+    def __len__(self) -> int:
+        return self.num_samples
+
+    def _pick_volume(self, index: int) -> _VolumeHandle:
+        """Select a volume.
+
+        ``volume_sampling="voxels"`` weights by total voxel count (the
+        historical behaviour) via ``np.searchsorted`` over the cached
+        cumulative-voxels array. ``"uniform"`` gives every volume the
+        same probability. Both use ``np.random.default_rng``.
+        """
+        rng = np.random.default_rng(index)
+        if self.volume_sampling == "uniform":
+            return self._handles[int(rng.integers(0, len(self._handles)))]
+        total = int(self._cum_voxels_arr[-1])
+        r = int(rng.integers(0, total))
+        i = int(np.searchsorted(self._cum_voxels_arr, r, side="right"))
+        if i >= len(self._handles):
+            i = len(self._handles) - 1
+        return self._handles[i]
+
+    def _random_patch_slices(
+        self, shape: Tuple[int, ...], rng: np.random.RandomState,
+    ) -> Tuple[slice, ...]:
+        """Generate random crop slices that fit within the volume."""
+        slices = []
+        for dim_size, patch_dim in zip(shape, self.patch_size):
+            max_start = max(0, dim_size - patch_dim)
+            start = rng.randint(0, max_start + 1)
+            slices.append(slice(start, start + patch_dim))
+        return tuple(slices)
+
+    def _spatial_shape(self, handle: _VolumeHandle) -> Tuple[int, ...]:
+        """Strip leading channel dim if present, returning only spatial dims."""
+        shape = handle.shape
+        if len(shape) == len(self.patch_size) + 1:
+            return shape[1:]
+        return shape
+
+    def _check_foreground(
+        self, handle: _VolumeHandle, crop_slices: Tuple[slice, ...],
+    ) -> Tuple[bool, Optional[np.ndarray], Optional[np.ndarray], float]:
+        """Check whether a crop has enough foreground.
+
+        Returns ``(ok, label, image, frac)``.  The decoded ``label`` /
+        ``image`` is returned alongside the boolean so ``__getitem__`` can
+        reuse the I/O it just paid for instead of decoding the same chunk
+        twice, and ``frac`` (the limiting gate score) lets the caller keep
+        the best-seen crop when all retries are exhausted.
+
+        * **Labeled volumes** are gated on the *label* non-zero fraction
+          (``min_foreground``) AND, when ``image_min_foreground`` > 0, the
+          *image* non-zero fraction, AND, when ``min_instances`` /
+          ``max_inst_frac`` > 0, instance DIVERSITY -- a crop must pass every
+          active gate (rejects background-heavy label crops, zero-padded EM,
+          AND crops filled by a single giant instance that would give
+          AffinityFGLoss no inter-instance "push" signal to learn from).
+        * **Label-less volumes** (e.g. SSL) are gated on the *image*
+          non-zero fraction (``image_min_foreground``) and, when set, on
+          the local-block std gate (``image_min_std``) and lag-1
+          autocorrelation (``image_min_autocorr``).  ``label`` is ``None``.
+
+        ``frac`` is the limiting score across the active gates (foreground
+        fraction, block-content fraction, autocorrelation, or instance
+        score).  The best-seen fallback keeps the highest score.
+        When no gate is active ``frac`` is ``1.0`` and no extra I/O is done.
+        """
+        if handle.label_path is not None:
+            if (self.min_foreground <= 0 and self.image_min_foreground <= 0
+                    and self.min_instances <= 0 and self.max_inst_frac <= 0):
+                return True, None, None, 1.0
+            label = None
+            image = None
+            label_frac = 1.0
+            image_frac = 1.0
+            inst_score = 1.0
+            need_label = (self.min_foreground > 0 or self.min_instances > 0
+                          or self.max_inst_frac > 0)
+            if need_label:
+                label = _read_patch(
+                    handle.label_path, crop_slices, handle.label_key, dtype=np.int64,
+                )
+                if self.min_foreground > 0:
+                    label_frac = float(np.count_nonzero(label)) / label.size
+            if self.image_min_foreground > 0:
+                image = _read_patch(
+                    handle.image_path, crop_slices, handle.image_key, dtype=np.float32,
+                )
+                image_frac = float(np.count_nonzero(image)) / image.size
+            inst_ok = True
+            if self.min_instances > 0 or self.max_inst_frac > 0:
+                ids, counts = np.unique(label, return_counts=True)
+                fg_counts = counts[ids != 0]
+                n_inst = int(fg_counts.size)
+                max_frac = float(fg_counts.max()) / fg_counts.sum() if n_inst else 1.0
+                if self.min_instances > 0:
+                    inst_ok = inst_ok and n_inst >= self.min_instances
+                    inst_score = min(inst_score, n_inst / self.min_instances)
+                if self.max_inst_frac > 0:
+                    inst_ok = inst_ok and max_frac <= self.max_inst_frac
+                    inst_score = min(inst_score, (1.0 - max_frac) / max(1.0 - self.max_inst_frac, 1e-6))
+            ok = (label_frac >= self.min_foreground
+                  and image_frac >= self.image_min_foreground
+                  and inst_ok)
+            frac = min(label_frac, image_frac, inst_score)
+            return ok, label, image, frac
+
+        # Label-less volume: optional image gates.
+        if (self.image_min_foreground <= 0 and self.image_min_std <= 0
+                and self.image_min_autocorr <= 0):
+            return True, None, None, 1.0
+        image = _read_patch(
+            handle.image_path, crop_slices, handle.image_key, dtype=np.float32,
+        )
+        if self.image_min_std > 0 or self.image_min_autocorr > 0:
+            # Two complementary gates on the per-volume [0, 1] scale:
+            #   * content-fraction (``image_min_std``): rejects FLAT crops
+            #     (resin / empty) -- split the crop into small blocks and
+            #     require a fraction of them to clear a local-std threshold.
+            #   * lag-1 autocorrelation (``image_min_autocorr``): rejects
+            #     NOISE-dominated crops (detector / resin grain), which the
+            #     std gate CANNOT catch because random noise has high local
+            #     variance (content_frac 1.0) yet ~0 spatial coherence.
+            # A crop must pass every ENABLED gate; best-seen ranks on the
+            # limiting (minimum) score so the fallback keeps the crop that is
+            # best on both axes.
+            params = self._norm_params.get(handle.name)
+            vmin = params[0] if params else float(image.min())
+            scale = self._norm_scale(handle)
+            img01 = np.clip((image - vmin) / scale, 0.0, 1.0)
+            required = self.image_min_foreground if self.image_min_foreground > 0 else 0.5
+            ok = True
+            score = 1.0
+            if self.image_min_std > 0:
+                content_frac = self._content_fraction(img01, self.image_min_std)
+                ok = ok and content_frac >= required
+                score = min(score, content_frac)
+            if self.image_min_autocorr > 0:
+                ac = self._lag1_autocorr(img01)
+                ok = ok and ac >= self.image_min_autocorr
+                score = min(score, ac)
+            return ok, None, image, score
+        # Block-std and autocorrelation gates off: non-zero fraction only.
+        nz_frac = float(np.count_nonzero(image)) / image.size
+        return nz_frac >= self.image_min_foreground, None, image, nz_frac
+
+    def __getitem__(self, index: int) -> Dict[str, Any]:
+        seed = index if self.deterministic else index + int(torch.randint(0, 2**31, (1,)).item())
+        rng = np.random.RandomState(seed)
+        handle = self._pick_volume(index)
+        spatial = self._spatial_shape(handle)
+
+        crop_slices = self._random_patch_slices(spatial, rng)
+        if len(handle.shape) > len(spatial):
+            full_slices = (slice(None),) + crop_slices
+        else:
+            full_slices = crop_slices
+
+        # Re-sample crops until the patch passes every enabled gate
+        # (labeled: label foreground, image non-zero, instance diversity;
+        # label-less: image non-zero, block-std content, autocorrelation).
+        # Carry the successful
+        # read forward so we don't decode the same chunk again below.  If
+        # every retry fails, fall back to the *best-seen* crop (highest
+        # gate score) and restore its
+        # slices so image/label stay consistent.
+        cached_label: Optional[np.ndarray] = None
+        cached_image: Optional[np.ndarray] = None
+        best: Optional[Tuple[float, Tuple[slice, ...],
+                             Optional[np.ndarray], Optional[np.ndarray]]] = None
+        for _ in range(self.max_foreground_retries):
+            ok, cached_label, cached_image, frac = self._check_foreground(handle, full_slices)
+            if ok:
+                break
+            if best is None or frac > best[0]:
+                best = (frac, full_slices, cached_label, cached_image)
+            crop_slices = self._random_patch_slices(spatial, rng)
+            full_slices = ((slice(None),) + crop_slices
+                           if len(handle.shape) > len(spatial)
+                           else crop_slices)
+        else:
+            if best is not None:
+                frac, full_slices, cached_label, cached_image = best
+                logger.warning(
+                    "Foreground gate exhausted %d retries for %s; "
+                    "accepting best-seen crop (foreground=%.2f).",
+                    self.max_foreground_retries, handle.name, frac,
+                )
+
+        if cached_image is not None:
+            image = cached_image
+        else:
+            image = _read_patch(
+                handle.image_path, full_slices, handle.image_key, dtype=np.float32,
+            )
+
+        if self.normalize and handle.name in self._norm_params:
+            vmin, vmax = self._norm_params[handle.name]
+            if vmax > vmin:
+                image = (image - vmin) / (vmax - vmin)
+
+        sample: Dict[str, Any] = {
+            "image": image,
+            "volume": handle.name,
+        }
+        if handle.prompt:
+            sample["prompt"] = handle.prompt
+        if handle.dataset:
+            sample["dataset"] = handle.dataset
+
+        if handle.label_path is not None:
+            if cached_label is not None:
+                label = cached_label
+            else:
+                label = _read_patch(
+                    handle.label_path, full_slices, handle.label_key, dtype=np.int64,
+                )
+            sample["label"] = label
+
+        if self.transform is not None:
+            # Validation reseeds the whole Compose from the sample index, so
+            # the crop index and the degradation are the same every epoch.
+            if self.deterministic and hasattr(self.transform, "set_random_state"):
+                self.transform.set_random_state(seed=int(index) % (2 ** 32))
+            sample = self.transform(sample)
+
+        return sample
