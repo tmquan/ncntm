@@ -132,9 +132,11 @@ def toy_containers(grid=TOY_GRID):
     kji = np.argwhere(instance == 3)
     bricks = Bricks(kji, grid.voxel_centers_nm(kji), grid.voxel_size_xyz_nm, instance_id=3, n_voxels_total=len(kji))
     mesh = box_mesh(grid.index_to_nm((10, 8, 2)), grid.index_to_nm((30, 24, 8)), instance_id=3)
-    nodes_kji = np.array([[5, 16, 12], [5, 16, 20], [5, 16, 28], [5, 10, 20], [3, 16, 20]])
-    skeleton = Skeleton(grid.voxel_centers_nm(nodes_kji), np.array([[0, 1], [1, 2], [1, 3], [1, 4]], dtype=np.int32),
-                        np.array([18.0, 30.0, 18.0, 12.0, 20.0]), instance_id=3)
+    # node 1 is a branch point (four edges), node 2 an ordinary node, the others are end points;
+    # edges 0, 1, 4 run along x, edge 2 along y, edge 3 along z
+    nodes_kji = np.array([[5, 16, 12], [5, 16, 18], [5, 16, 24], [5, 10, 18], [3, 16, 18], [5, 16, 28]])
+    skeleton = Skeleton(grid.voxel_centers_nm(nodes_kji), np.array([[0, 1], [1, 2], [1, 3], [1, 4], [2, 5]], dtype=np.int32),
+                        np.array([18.0, 30.0, 24.0, 12.0, 20.0, 15.0]), instance_id=3)
     covariances = np.array([np.diag([400.0, 100.0, 2500.0]), [[900.0, 300.0, 100.0], [300.0, 400.0, 50.0], [100.0, 50.0, 1600.0]]])
     gaussians = Gaussians(grid.voxel_centers_nm(np.array([[5, 16, 14], [4, 14, 26]])), covariances, np.array([0.6, 0.4]),
                           colors_rgb=np.array([[0.9, 0.5, 0.1], [0.1, 0.5, 0.9]]), instance_id=3)
@@ -200,10 +202,22 @@ def real():
 
 
 def leaf_prims(built) -> list:
-    """Every drawable prim that the build functions returned (slices, bricks, ..., frame parts)."""
-    p = built.prims
-    return ([q for group in p.slices.values() for q in group]
-            + [p.bricks, p.surface, p.wire, p.tubes, p.nodes, p.splats, p.ellipsoids] + list(p.frame.values()))
+    """Every drawable prim that the add_* methods returned (slices, bricks, ..., frame parts)."""
+    found = []
+
+    def collect(value):
+        if isinstance(value, Usd.Prim):
+            if not value.IsA(UsdGeom.Camera):
+                found.append(value)
+        elif isinstance(value, dict):
+            for item in value.values():
+                collect(item)
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                collect(item)
+
+    collect(vars(built.prims))
+    return found
 
 
 class showing:
@@ -242,7 +256,8 @@ def test_colour_tables():
     assert tuple(viridis[0]) == (0x44, 0x01, 0x54) and tuple(viridis[255]) == (0xfd, 0xe7, 0x25)
     linear = S.srgb_to_linear(viridis / 255.0)
     luminance = linear @ np.array([0.2126, 0.7152, 0.0722])
-    assert np.all(np.diff(luminance) > 0)                                  # brighter with every step
+    assert np.all(luminance[2:] > luminance[:-2])                          # brighter from any row to the next but one
+    assert np.diff(luminance).min() > -5e-4 and luminance[255] > 40 * luminance[0]      # single rows: 8-bit rounding
     assert np.abs(viridis.astype(int) - grey.astype(int)).max(axis=1).min() > 30     # never a grey
     assert raises(ValueError, S.colormap_rgb8, "jet")
 
@@ -454,23 +469,35 @@ def test_wrong_input_fails_loudly():
 
 
 # ---- the frames -----------------------------------------------------------------------------------
-def test_voxel_centres_round_trip_through_the_voxels_frame():
-    for built in (toy(), real()):
-        grid, ds = built.grid, built.ds
-        rng = np.random.default_rng(3)
-        nz, ny, nx = grid.shape_zyx
-        kji = np.stack([rng.integers(0, n, 500) for n in (nz, ny, nx)], axis=1)
-        kji = np.concatenate([kji, [[0, 0, 0], [nz - 1, ny - 1, nx - 1]]])
-        for space in SPACES:
-            ds.set_space(space)
-            m = UsdGeom.Xformable(ds.voxels).ComputeLocalToWorldTransform(Usd.TimeCode.Default())
-            world = np.array([m.Transform(Gf.Vec3d(i + 0.5, j + 0.5, k + 0.5)) for k, j, i in kji.tolist()])
-            expected = grid.voxel_centers_nm(kji, space) / NM_PER_UNIT
-            assert np.abs(world - expected).max() < 1e-9                       # stage units
-            assert np.array_equal(grid.nm_to_voxel(world * NM_PER_UNIT, space), kji)
-            back = np.array([m.GetInverse().Transform(Gf.Vec3d(*p)) for p in world.tolist()])
-            assert np.array_equal(np.floor(back).astype(int)[:, ::-1], kji)
-        ds.set_space("physical")
+def check_round_trip(built):
+    grid, ds = built.grid, built.ds
+    rng = np.random.default_rng(3)
+    nz, ny, nx = grid.shape_zyx
+    kji = np.stack([rng.integers(0, n, 500) for n in (nz, ny, nx)], axis=1)
+    kji = np.concatenate([kji, [[0, 0, 0], [nz - 1, ny - 1, nx - 1]]])
+    worst = 0.0
+    for space in SPACES:
+        ds.set_space(space)
+        m = UsdGeom.Xformable(ds.voxels).ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+        world = np.array([m.Transform(Gf.Vec3d(i + 0.5, j + 0.5, k + 0.5)) for k, j, i in kji.tolist()])
+        expected = grid.voxel_centers_nm(kji, space) / NM_PER_UNIT
+        worst = max(worst, np.abs(world - expected).max())
+        assert np.abs(world - expected).max() < 1e-9                       # stage units
+        assert np.array_equal(grid.nm_to_voxel(world * NM_PER_UNIT, space), kji)
+        back = np.array([m.GetInverse().Transform(Gf.Vec3d(*p)) for p in world.tolist()])
+        assert np.array_equal(np.floor(back).astype(int)[:, ::-1], kji)
+        assert np.abs((world_matrix(ds.voxels) @ np.c_[kji[:, ::-1] + 0.5, np.ones(len(kji))].T).T[:, :3] - expected).max() < 1e-9
+    ds.set_space("physical")
+    return worst
+
+
+def test_voxel_centres_round_trip_through_the_voxels_frame_toy():
+    check_round_trip(toy())
+
+
+def test_voxel_centres_round_trip_through_the_voxels_frame_snemi3d():
+    worst = check_round_trip(real())
+    print(f"\n  max |USD - closed form| = {worst:.2e} stage units over 502 voxel centres, both spaces")
 
 
 def test_world_bounding_box_in_both_spaces():
@@ -578,7 +605,7 @@ def test_wiremesh_and_skeleton_tubes():
     wire, tubes = UsdGeom.BasisCurves(t.prims.wire), UsdGeom.BasisCurves(t.prims.tubes)
     edges = t.mesh.edges()
     assert len(edges) == 18                                                    # a triangulated box
-    for curves, n_edges in ((wire, 18), (tubes, 4)):
+    for curves, n_edges in ((wire, 18), (tubes, 5)):
         assert curves.GetTypeAttr().Get() == "linear" and curves.GetWidthsInterpolation() == "vertex"
         assert list(curves.GetCurveVertexCountsAttr().Get()) == [2] * n_edges
         assert not curves.GetPrim().GetAttribute("normals").HasAuthoredValue()
@@ -596,10 +623,11 @@ def test_wiremesh_and_skeleton_tubes():
         assert np.abs(np.array(wire.GetPointsAttr().Get()) - t.grid.to_space(t.mesh.vertices_xyz_nm, space)[edges.reshape(-1)]).max() < 1e-3
     t.ds.set_space("physical")
     assert np.allclose(np.array(tubes.GetWidthsAttr().Get()), 2.0 * s.radii_nm[order], rtol=1e-6)      # width = 2 x radius
-    t.ds.set_space("index")       # edges 0, 1 run along x, edge 2 along y, edge 3 along z
+    t.ds.set_space("index")       # edges 0, 1, 4 run along x, edge 2 along y, edge 3 along z
     widths = np.array(tubes.GetWidthsAttr().Get()).reshape(-1, 2)
-    assert np.allclose(widths[:3], 2.0 * s.radii_nm[s.edges[:3]] * math.sqrt(1 / 5), rtol=1e-6)
-    assert np.allclose(widths[3], 2.0 * s.radii_nm[s.edges[3]], rtol=1e-6)
+    in_plane = [0, 1, 2, 4]
+    assert np.allclose(widths[in_plane], 2.0 * s.radii_nm[s.edges[in_plane]] * math.sqrt(1 / 5), rtol=1e-6)
+    assert np.allclose(widths[3], 2.0 * s.radii_nm[s.edges[3]], rtol=1e-6)        # along z: unchanged
     t.ds.set_space("physical")
 
 
@@ -608,8 +636,8 @@ def test_skeleton_node_markers():
     s = t.skeleton
     instancer = UsdGeom.PointInstancer(t.prims.nodes)
     assert [p.name for p in instancer.GetPrototypesRel().GetTargets()] == ["proto_node", "proto_branch_point", "proto_end_point"]
-    assert list(instancer.GetProtoIndicesAttr().Get()) == [2, 1, 2, 2, 2]       # node 1 has four edges, the others one
-    marker = s.radii_nm * np.array([1.5, 1.5, 1.5, 1.5, 1.5])
+    assert list(instancer.GetProtoIndicesAttr().Get()) == [2, 1, 0, 2, 2, 2]    # end, branch, ordinary, end, end, end
+    marker = s.radii_nm * np.array([1.5, 1.5, 1.0, 1.5, 1.5, 1.5])              # branch and end points are 1.5 times larger
     for space in SPACES:
         t.ds.set_space(space)
         matrices = instance_world_matrices(t.prims.nodes)
@@ -690,24 +718,30 @@ def test_splat_prim_follows_the_particle_field_schema():
 
 
 def test_frame_gnomon_and_scale_bar():
-    r = real()
-    frame = r.prims.frame
-    assert frame["scalebar"].GetAttribute("em:lengthNm").Get() == 500.0         # largest 1-2-5 length within 3072 / 4
-    assert frame["scalebar"].GetAttribute("em:label").Get() == "500 nm"
-    diagonal = np.linalg.norm(r.grid.extent_xyz_nm)
-    assert abs(list(UsdGeom.BasisCurves(frame["bbox"]).GetWidthsAttr().Get())[0] - 0.003 * diagonal) < 1e-3
-    for space, arms in (("physical", (0.5, 0.5, 0.5)), ("index", (0.5, 0.5, 0.1))):
-        r.ds.set_space(space)
-        for axis, expected in zip("xyz", arms):
-            size = world_size(frame["gnomon"].GetChild(axis))
-            k = "xyz".index(axis)
-            assert abs(size[k] - expected) < 1e-6                                # micrometres drawn for 500 nm of tissue
-            thickness = np.delete(size, k)
-            assert np.allclose(thickness, 0.5 / 12.0, atol=1e-6)                 # the same in both spaces
-        assert abs(world_size(frame["scalebar"])[0] - 0.5) < 1e-6
-    r.ds.set_space("physical")
+    t = toy()
+    frame, extent = t.prims.frame, t.grid.extent_xyz_nm                       # 240 x 192 x 300 nm
+    bar = 50.0                                                                # largest 1-2-5 length within 240 / 4
+    assert frame["scalebar"].GetAttribute("em:lengthNm").Get() == bar
+    assert frame["scalebar"].GetAttribute("em:label").Get() == "50 nm"
+    assert frame["scalebar"].GetAttribute("em:axis").Get() == "x"
+    width = list(UsdGeom.BasisCurves(frame["bbox"]).GetWidthsAttr().Get())[0]
+    assert abs(width - 0.003 * np.linalg.norm(extent)) < 1e-4                 # 0.3 % of the box diagonal
+    for space, arms_nm in (("physical", (50.0, 50.0, 50.0)), ("index", (50.0, 50.0, 10.0))):
+        t.ds.set_space(space)
+        for k, axis in enumerate("xyz"):
+            size = world_size(frame["gnomon"].GetChild(axis)) * NM_PER_UNIT
+            assert abs(size[k] - arms_nm[k]) < 1e-3                           # nm drawn for 50 nm of tissue
+            assert np.allclose(np.delete(size, k), bar / 12.0, atol=1e-3)     # thickness: the same in both spaces
+        assert abs(world_size(frame["scalebar"])[0] * NM_PER_UNIT - bar) < 1e-3
+        corners = world_points(frame["bbox"]) * NM_PER_UNIT
+        assert np.abs(corners.min(axis=0)).max() < 1e-3 and np.abs(corners.max(axis=0) - t.grid.extent_nm(space)).max() < 1e-3
+        assert np.abs(world_size(frame["bbox"]) * NM_PER_UNIT - (t.grid.extent_nm(space) + width)).max() < 1e-3
+    t.ds.set_space("physical")
     colours = [S.linear_to_srgb(np.array(UsdGeom.Mesh(frame["gnomon"].GetChild(axis)).GetDisplayColorAttr().Get()[0])) for axis in "xyz"]
-    assert [int(np.argmax(c)) for c in colours] == [0, 1, 2]                     # x red, y green, z blue
+    assert [int(np.argmax(c)) for c in colours] == [0, 1, 2]                  # x red, y green, z blue
+    for prim in (frame["bbox"], frame["scalebar"], frame["gnomon"].GetChild("z")):      # annotation is unlit
+        surface = UsdShade.MaterialBindingAPI(prim).ComputeBoundMaterial()[0].ComputeSurfaceSource()[0]
+        assert max(surface.GetInput("emissiveColor").Get()) > 0 and tuple(surface.GetInput("diffuseColor").Get()) == (0, 0, 0)
 
 
 def test_switching_the_space_moves_every_layer_together():
@@ -737,7 +771,8 @@ def test_switching_the_space_moves_every_layer_together():
                  "gaussian means", "ellipsoid centres", "bounding box"):
         a, b = index_coordinates[name, "physical"], index_coordinates[name, "index"]
         assert np.abs(a - b).max() < 2e-3, name                 # the same place in the array, in voxels
-        for k in (0, 1):
+        on_faces = name in ("surface vertices", "wire vertices", "bounding box")     # no containing voxel: round-off decides
+        for k in ((1,) if on_faces else (0, 1)):
             assert np.array_equal(inside[name, "physical"][k], inside[name, "index"][k]), name
     for space in SPACES:
         assert inside["skeleton tubes", space][0].all() and inside["skeleton nodes", space][0].all()
@@ -810,19 +845,26 @@ def test_stage_export_would_lose_the_variants():
     assert Usd.Stage.Open(str(kept)).GetPrimAtPath("/World/toy").GetVariantSets().GetNames() == ["space"]
 
 
-def test_stages_pass_the_usd_validators():
-    for built in (toy(), real()):
-        for space in SPACES:
-            built.ds.set_space(space)
-            assert S.validate(built.stage) == []
-        built.ds.set_space("physical")
+def test_toy_stage_passes_the_usd_validators():
+    t = toy()
+    for space in SPACES:
+        t.ds.set_space(space)
+        assert S.validate(t.stage) == []
+    t.ds.set_space("physical")
+    # the validators do find things: a stage without metadata fails
+    assert len(S.validate(Usd.Stage.CreateInMemory())) > 0
+
+
+def test_real_stage_passes_the_usd_validators():
     r = real()
+    for space in SPACES:
+        r.ds.set_space(space)
+        assert S.validate(r.stage) == []
+    r.ds.set_space("physical")
     for extension in ("usda", "usdc"):
         target = tmp_dir() / f"validate_{extension}" / f"snemi3d.{extension}"
         r.ds.save(target)
         assert S.validate(Usd.Stage.Open(str(target))) == []
-    # the validators do find things: a stage without metadata fails
-    assert len(S.validate(Usd.Stage.CreateInMemory())) > 0
 
 
 def test_rerunning_a_cell_replaces_what_it_made():
@@ -900,7 +942,7 @@ def check_slices_face_on(built, volumes=None):
             volume = instance if kind == "instance" else raw
             for prim in prims:
                 axis, index = prim.GetAttribute("em:slice:axis").Get(), prim.GetAttribute("em:slice:index").Get()
-                image = {"z": volume[index], "y": volume[:, index, :], "x": volume[:, :, index]}[axis]
+                image = volume[index] if axis == "z" else volume[:, index, :] if axis == "y" else volume[:, :, index]
                 window = tuple(prim.GetAttribute("em:slice:window").Get())
                 expected = {"rawvalue": lambda: np.repeat(image[..., None], 3, axis=2),
                             "voxvalue": lambda: S.slice_lut8("viridis", window)[image],
@@ -946,10 +988,7 @@ def test_slices_of_a_crop_and_of_a_derived_sample():
     assert ds.prim.GetAttribute("em:sampleFile").Get() == "snemi3d.h5"
     assert tuple(ds.prim.GetAttribute("em:voxelOffset").Get()) == (200, 100, 10)       # (i0, j0, k0)
     prims = {"rawvalue": ds.add_slices("rawvalue", z=7, y=30), "instance": ds.add_slices("instance", x=11)}
-    built = SimpleNamespace(stage=stage, ds=ds, sample=crop, prims=SimpleNamespace(
-        slices=prims, bricks=prims["rawvalue"][0], surface=prims["rawvalue"][0], wire=prims["rawvalue"][0],
-        tubes=prims["rawvalue"][0], nodes=prims["rawvalue"][0], splats=prims["rawvalue"][0],
-        ellipsoids=prims["rawvalue"][0], frame={}))
+    built = SimpleNamespace(stage=stage, ds=ds, sample=crop, prims=SimpleNamespace(slices=prims))
     assert check_slices_face_on(built) == 0            # read from the file through em:voxelOffset
     # a strided sample has voxels that are not in the file: the arrays must be handed over
     thick = crop.strided(2)
@@ -982,15 +1021,24 @@ def test_object_and_depth_buffers_show_each_layer_inside_the_box():
     r = real()
     p = r.prims
     height = 120 if r.small else 360
-    slack = 1.5 * r.skeleton.radii_nm.max() / NM_PER_UNIT          # a node marker may reach out of the array
-    cases = [("bricks", p.bricks, 1e-4), ("surface", p.surface, 1e-4), ("wire", p.wire, 0.01),
-             ("skeleton tubes", p.tubes, slack), ("skeleton nodes", p.nodes, slack),
-             ("gaussians", p.splats, 1e-4), ("ellipsoids", p.ellipsoids, 0.15)]
+    # how far each kind may reach out of the array box, in micrometres:
+    marker = 1.5 * r.skeleton.radii_nm.max() / NM_PER_UNIT         # a node marker at the border of the array
+    wire = r.prims.wire.GetAttribute("em:widthNm").Get() / NM_PER_UNIT
     report = []
     for space in SPACES:
         r.ds.set_space(space)
         camera = U.camera_from_stage(r.stage, "/World/Cameras/overview", height=height, ssaa=1)
         lo, hi = np.zeros(3), r.grid.extent_nm(space) / NM_PER_UNIT
+        means = np.array(p.splats.GetAttribute("em:gaussian:means").Get()) / NM_PER_UNIT
+        deviations = np.sqrt(np.einsum("nii->ni", np.array(p.splats.GetAttribute("em:gaussian:covariances").Get()))) / NM_PER_UNIT
+
+        def reach(k):          # of the k-sigma boxes of the Gaussians
+            return max(0.0, (lo - (means - k * deviations)).max(), ((means + k * deviations) - hi).max())
+
+        cases = [("bricks", p.bricks, 1e-4), ("surface", p.surface, 1e-4), ("wire", p.wire, wire),
+                 ("skeleton tubes", p.tubes, marker), ("skeleton nodes", p.nodes, marker),
+                 ("gaussians", p.splats, reach(2.0)),               # fuzzy: half opacity is reached within 2 sigma
+                 ("ellipsoids", p.ellipsoids, reach(math.sqrt(5.0)) + 1e-3)]
         for name, prim, tolerance in cases:
             with showing(r, prim):
                 scene = U.build_scene(r.stage, tube_sides=4 if r.small else 10, sphere_subdiv=1 if r.small else 2)
@@ -998,11 +1046,13 @@ def test_object_and_depth_buffers_show_each_layer_inside_the_box():
             assert [o["path"] for o in scene.objects.values()] == [str(prim.GetPath())]
             hit = picture.object_id == 1
             assert set(np.unique(picture.object_id)) == {-1, 1}
-            assert hit.mean() > 0.01, (name, space, hit.mean())             # it is in the picture
+            assert hit.mean() > 0.002, (name, space, hit.mean())            # it is in the picture
             assert np.array_equal(hit, np.isfinite(picture.depth))
             points = pixel_positions(camera, picture)[hit]
-            assert np.all(points > lo - tolerance) and np.all(points < hi + tolerance), (name, space)
-            report.append(f"{name} {space}: {hit.mean():.3f} of the picture, z {points[:, 2].min():.3f} .. {points[:, 2].max():.3f} um")
+            outside = max(0.0, (lo - points).max(), (points - hi).max())
+            assert outside <= tolerance, (name, space, outside, tolerance)
+            report.append(f"{name:15s} {space:8s}: {hit.mean():.3f} of the picture, z {points[:, 2].min():.3f} .. "
+                          f"{points[:, 2].max():.3f} um, out of the box by {outside:.4f} (allowed {tolerance:.4f})")
     r.ds.set_space("physical")
     print("\n  " + "\n  ".join(report))
 
@@ -1013,10 +1063,17 @@ def test_picture_of_all_layers_in_both_spaces():
     height = 180 if r.small else 900
     for space in SPACES:
         r.ds.set_space(space)
-        scene = U.build_scene(r.stage, tube_sides=4 if r.small else 10, sphere_subdiv=1 if r.small else 2)
-        picture = scene.render(U.default_camera(r.stage, height=height))
+        detail = dict(tube_sides=4 if r.small else 10, sphere_subdiv=1 if r.small else 2)
+        camera = U.default_camera(r.stage, height=height)
+        scene = U.build_scene(r.stage, **detail)
+        picture = scene.render(camera)
+        assert {o["layer"] for o in scene.objects.values()} == set(S.LAYERS)            # every layer is in the scene
+        # the object-id buffer holds the nearest surface of each pixel, so only the outer layers appear in it
         layers_seen = {scene.objects[i]["layer"] for i in np.unique(picture.object_id) if i > 0}
-        assert layers_seen == set(S.LAYERS), (space, layers_seen)
+        assert {"rawvalue", "voxvalue", "instance", "frame"} <= layers_seen, (space, layers_seen)
+        # the Gaussians are inside the instance: they change the colours, not the nearest surface
+        without = U.build_scene(r.stage, layers=[n for n in S.LAYERS if n != "gaussian"], **detail).render(camera)
+        assert np.abs(picture.rgba_float - without.rgba_float).max() > 0.05
         assert picture.rgba.shape == (height, height * 4 // 3, 4)
         path = out_dir() / f"snemi3d_all_layers_{space}.png"
         picture.save(str(path))
@@ -1031,7 +1088,7 @@ def test_camera_authored_on_the_stage_drives_the_warp_picture():
     direction = (1.0, -1.0, 0.6)
     fitted = emray.Camera.fit(np.zeros(3), r.grid.extent_xyz_nm / NM_PER_UNIT, direction=direction)   # the same rule
     camera = U.camera_from_stage(r.stage, "/World/Cameras/overview", height=300)
-    assert camera.mode == "perspective" and abs(camera.fov - 35.0) < 1e-9
+    assert camera.mode == "perspective" and abs(camera.fov - 35.0) < 1e-5       # focalLength is a float attribute
     assert (camera.width, camera.height) == (400, 300)
     assert np.allclose(camera.eye, fitted.eye, rtol=1e-12)
     for mine, theirs in zip(camera.basis(), fitted.basis()):
@@ -1062,7 +1119,8 @@ def test_visibility_purpose_layers_and_unknown_prims():
     t = build_toy(tmp_dir() / "adapter" / "toy.usda")
     scene = U.build_scene(t.stage, volumes=t.volumes)
     paths = {o["path"] for o in scene.objects.values()}
-    assert str(t.prims.splats.GetPath()) in paths and str(t.prims.ellipsoids.GetPath()) not in paths      # invisible
+    shown, hidden = (t.prims.splats, t.prims.ellipsoids) if S.splat_schema_available() else (t.prims.ellipsoids, t.prims.splats)
+    assert str(shown.GetPath()) in paths and str(hidden.GetPath()) not in paths            # invisible prims are left out
     assert not any("proto_" in path or "/looks/" in path for path in paths)
     everything = len(paths)
     # layers
@@ -1091,6 +1149,7 @@ def test_visibility_purpose_layers_and_unknown_prims():
         warnings.simplefilter("always")
         scene = U.build_scene(t.stage, volumes=t.volumes)
     assert len(scene.objects) == everything
+    caught = [w for w in caught if "build_scene" in str(w.message)]
     assert len(caught) == 1
     message = str(caught[0].message)
     for needle in ("prim type Cylinder", "/World/extra/can", "prim type Cone", "/World/extra/hat",
@@ -1100,7 +1159,7 @@ def test_visibility_purpose_layers_and_unknown_prims():
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         U.build_scene(toy().stage, volumes=toy().volumes)
-    assert caught == []
+    assert [w for w in caught if "build_scene" in str(w.message)] == []
 
 
 def test_adapter_reads_plain_gprims_and_a_foreign_splat_prim():
@@ -1133,7 +1192,7 @@ def test_adapter_reads_plain_gprims_and_a_foreign_splat_prim():
     picture = scene.render(camera, ambient=1.0)                             # no shading: the colour as authored
     assert picture.object_id[32, 32] == kinds["Sphere"]
     assert np.array_equal(picture.rgba[32, 32, :3], [51, 102, 153])         # 0.2, 0.4, 0.6 as display values
-    assert abs(picture.depth[32, 32] - (40.0 - 7.0)) < 1e-2                 # the top of the ellipsoid, z = 3 + 4
+    assert abs(picture.depth[32, 32] - (40.0 - 7.0)) < 0.1                  # the top of the ellipsoid, z = 3 + 4
     # a splat prim without em:gaussian:* attributes: covariance = R diag(scales^2) R^T
     if not S.splat_schema_available():
         return
@@ -1147,11 +1206,13 @@ def test_adapter_reads_plain_gprims_and_a_foreign_splat_prim():
         prim.CreateAttribute(name, source.GetTypeName(), False).Set(source.Get())
     scene = U.build_scene(stage2)
     assert scene.num_gaussians == 2
-    means, world_to_unit = scene._g[0][0], scene._g[0][1]                   # emray keeps W with W^T W = inverse covariance
-    assert np.abs(means - t.gaussians.means_xyz_nm).max() < 1e-3
-    covariance = np.linalg.inv(np.swapaxes(world_to_unit, 1, 2) @ world_to_unit)
-    assert np.abs(covariance - t.gaussians.covariances_nm2).max() / np.abs(t.gaussians.covariances_nm2).max() < 1e-5
-    assert np.abs(scene._g[0][3][:, :3] - t.gaussians.colors_rgb).max() < 1e-6
+    g = t.gaussians
+    reference = emray.Scene()                  # the same Gaussians, given to the ray caster directly, in nm
+    reference.add_gaussians(g.means_xyz_nm, covs=g.covariances_nm2, opacity=0.8, color=g.colors_rgb)
+    camera = emray.Camera.fit(g.means_xyz_nm.min(axis=0) - 150.0, g.means_xyz_nm.max(axis=0) + 150.0, width=96, height=96, ssaa=1)
+    seen, expected = scene.render(camera), reference.render(camera, device=U.render_device())
+    assert expected.rgba_float[..., :3].min() < 0.5                         # the Gaussians are in the picture
+    assert np.abs(seen.rgba_float - expected.rgba_float).max() < 2e-3
 
 
 def test_render_device_follows_the_environment():

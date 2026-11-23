@@ -1,6 +1,6 @@
 # =====================================================================
-# pretrain.yaml  --  Cosmos3-Edge (4B) self-supervised pretraining on
-# SNEMI3D / Kasthuri 2015 + COSEM 4 nm raw EM only (no segmentation)
+# pretrain_snemi3d.yaml  --  Cosmos3-Edge (4B) self-supervised pretraining on
+# SNEMI3D / Kasthuri 2015 raw EM only (no segmentation)
 # =====================================================================
 # Every batch is task ``ssl``: reconstruct clean 4 nm EM from a degraded
 # large-voxel input (RandResolutionDegraded).  Same model, fine grid, SSL
@@ -22,8 +22,7 @@ ckpt_path: null
 ckpt_path_skip_prefixes: []
 ckpt_path_only_prefixes: null
 
-snemi_root: ${oc.env:NCNTM_DATA_DIR,${hydra:runtime.cwd}/data}/SNEMI3D
-cosem_root: ${oc.env:NCNTM_DATA_DIR,${hydra:runtime.cwd}/data}/COSEM3D
+snemi3d_root: ${oc.env:NCNTM_DATA_DIR,${hydra:runtime.cwd}/data}/SNEMI3D
 
 data:
   # Fixed fine network grid: 4 nm cubic voxel, patch (z, y, x).  Wan2.2 VAE
@@ -75,46 +74,29 @@ data:
       # contains AC4 and the cylinder's lower half, and overlaps AC3 in y
       # 8712-9248, so the val volumes below are not a spatial holdout.
       - vol: neurons_cc_5904x4816x1848_x2512_y4432_z0_volume
-        root: ${snemi_root}
+        root: ${snemi3d_root}
         dataset: kasthuri_cc
         native_resolution: [30, 6, 6]
         imaging: ssSEM
       # Kasthuri cylinder (cc) image: adds y 9248-10100 outside the cropping.
       - vol: neurons_cc_5000x2900x300_x3000_y7200_z950_volume
-        root: ${snemi_root}
+        root: ${snemi3d_root}
         dataset: kasthuri_cc
         native_resolution: [30, 6, 6]
         imaging: ssSEM
-      # COSEM FIB-SEM at true 4 nm cubic voxels (the fine grid itself, so no
-      # degrade-by-resampling of the target).  Group name defaults to the root
-      # dir name (COSEM3D); balance: dataset gives it an equal batch share.
-      - {vol: jrc_hela-3_4nm_x4096_y0_z2048_volume, root: "${cosem_root}", native_resolution: [4, 4, 4], imaging: FIB-SEM}
-      - {vol: jrc_hela-3_4nm_x6144_y0_z2048_volume, root: "${cosem_root}", native_resolution: [4, 4, 4], imaging: FIB-SEM}
-      - {vol: jrc_hela-3_4nm_x4096_y0_z0_volume, root: "${cosem_root}", native_resolution: [4, 4, 4], imaging: FIB-SEM}
-      - {vol: jrc_hela-3_4nm_x4096_y0_z4096_volume, root: "${cosem_root}", native_resolution: [4, 4, 4], imaging: FIB-SEM}
-      - {vol: jrc_hela-3_4nm_x2048_y0_z4096_volume, root: "${cosem_root}", native_resolution: [4, 4, 4], imaging: FIB-SEM}
-      - {vol: jrc_macrophage-2_4nm_x4096_y0_z4096_volume, root: "${cosem_root}", native_resolution: [4, 4, 4], imaging: FIB-SEM}
-      - {vol: jrc_jurkat-1_4nm_x4096_y0_z0_volume, root: "${cosem_root}", native_resolution: [4, 4, 4], imaging: FIB-SEM}
-      - {vol: jrc_jurkat-1_4nm_x4096_y0_z4096_volume, root: "${cosem_root}", native_resolution: [4, 4, 4], imaging: FIB-SEM}
-
   val_batch_size: 2
-  # One group per dataset name: 5 groups (4 SNEMI3D + COSEM3D) x 16 crops /
-  # batch 2 = 40 batches.
+  # One group per dataset name: 4 SNEMI3D groups x 16 crops / batch 2 = 32 batches.
   val_balance: dataset
   val_num_samples: 16
   val_volumes:
-  # COSEM holdouts (tiles not in the train list).
-  - {vol: jrc_hela-3_4nm_x6144_y0_z0_volume, root: "${cosem_root}", task: ssl, native_resolution: [4, 4, 4], imaging: FIB-SEM}
-  - {vol: jrc_macrophage-2_4nm_x2048_y0_z4096_volume, root: "${cosem_root}", task: ssl, native_resolution: [4, 4, 4], imaging: FIB-SEM}
-  - {vol: jrc_jurkat-1_4nm_x0_y0_z2048_volume, root: "${cosem_root}", task: ssl, native_resolution: [4, 4, 4], imaging: FIB-SEM}
   - vol: AC3_cc_inputs
-    root: ${snemi_root}
+    root: ${snemi3d_root}
     dataset: AC3_cc
     task: ssl
     native_resolution: [30, 6, 6]
     imaging: ssSEM
   - vol: AC4_cc_inputs
-    root: ${snemi_root}
+    root: ${snemi3d_root}
     dataset: AC4_cc
     task: ssl
     native_resolution: [30, 6, 6]
@@ -122,13 +104,13 @@ data:
   # Uncorrected-contrast copies of the same tissue: tracks robustness to the
   # per-slice brightness swings the cc training data does not have.
   - vol: AC3_em_inputs
-    root: ${snemi_root}
+    root: ${snemi3d_root}
     dataset: AC3_em
     task: ssl
     native_resolution: [30, 6, 6]
     imaging: ssSEM
   - vol: AC4_em_inputs
-    root: ${snemi_root}
+    root: ${snemi3d_root}
     dataset: AC4_em
     task: ssl
     native_resolution: [30, 6, 6]

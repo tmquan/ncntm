@@ -131,7 +131,7 @@ class Joint3DReconSegLoss(nn.Module):
 
     Training configs use a 32-channel head (30 affinity offsets + sem + raw)
     and ``recon_loss="l1"``.  Pretrain
-    (``configs/pretrain.yaml``) sets ``weight_rec=1``,
+    (``configs/pretrain_snemi3d.yaml``) sets ``weight_rec=1``,
     ``weight_ssl=5``, ``weight_seg=0``, ``weight_sft=0``.  The constructor
     defaults are the signature values.
 

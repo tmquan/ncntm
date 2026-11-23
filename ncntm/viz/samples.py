@@ -50,12 +50,14 @@ def samples_dir() -> Path:
 
 
 def manifest() -> dict:
-    """``samples/manifest.json`` as a dict (key ``"samples"``: one entry per file)."""
+    """``manifest.json`` of the samples directory as a dict.  Key ``"samples"`` is a list
+    with one entry per file; this module uses only its ``"name"`` and ``"file"``."""
     path = samples_dir() / "manifest.json"
     if not path.is_file():
         raise FileNotFoundError(
-            f"no manifest.json in {samples_dir()}; set the environment variable NCNTM_SAMPLES "
-            "to the directory that holds the sample files"
+            f"no manifest.json in {samples_dir()}: the sample files are not there. "
+            "Write them with scripts/make_samples.py, or set the environment variable "
+            "NCNTM_SAMPLES to the directory that holds them"
         )
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)

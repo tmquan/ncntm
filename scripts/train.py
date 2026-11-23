@@ -7,10 +7,10 @@ module + trainer, then calls ``trainer.fit(...)``.
 
 Examples
 --------
-    python scripts/train.py --config-name pretrain
-    python scripts/train.py --config-name pretrain training.devices=1 training.fast_dev_run=true
-    python scripts/train.py --config-name pretrain training.resume_from_checkpoint=<run_dir>/checkpoints/last.ckpt
-    python scripts/train.py --config-name pretrain +ckpt_path=<run_dir>/checkpoints/last.ckpt
+    python scripts/train.py --config-name pretrain_snemi3d
+    python scripts/train.py --config-name pretrain_snemi3d training.devices=1 training.fast_dev_run=true
+    python scripts/train.py --config-name pretrain_snemi3d training.resume_from_checkpoint=<run_dir>/checkpoints/last.ckpt
+    python scripts/train.py --config-name pretrain_snemi3d +ckpt_path=<run_dir>/checkpoints/last.ckpt
 """
 
 from __future__ import annotations
@@ -428,7 +428,7 @@ def _write_run_provenance(run_dir: Path) -> None:
     (run_dir / "git_diff.patch").write_text(_git("diff", "HEAD"))
 
 
-@hydra.main(version_base=None, config_path="../configs", config_name="pretrain")
+@hydra.main(version_base=None, config_path="../configs", config_name="pretrain_snemi3d")
 def main(cfg: DictConfig) -> None:
     _install_runtime_patches()
 

@@ -55,7 +55,8 @@ AC3/AC4 bounding boxes use the `cc` numbering). Within that mapping the residual
 holding min 0 / max 255): only the true 4 x 4 x 4 nm cubic files (`*_4nm_*`) are copied from
 `/home/nvidia/data/COSEM3D`. They were resampled to cubic voxels from the 4 x 4 x 3.24 nm (HeLa) and
 4 x 4 x 3.44 nm (Jurkat) originals; those non-cubic files are not copied. The suffix `x<X>_y<Y>_z<Z>` is
-the tile's origin in the source volume. Raw only, no labels. In `configs/pretrain.yaml` the train tiles are
+the tile's origin in the source volume. Raw only, no labels. COSEM3D is currently **not** in `configs/pretrain_snemi3d.yaml`. The tiles below
+were in an earlier version of the config (the train tiles were
 HeLa x4096_z2048 / x6144_z2048 / x4096_z0 / x4096_z4096 / x2048_z4096, Macrophage x4096_z4096 and Jurkat
 x4096_z0 / x4096_z4096; the validation tiles are HeLa x6144_z0, Macrophage x2048_z4096 and Jurkat
-x0_z2048.
+x0_z2048).

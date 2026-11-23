@@ -53,8 +53,10 @@ def test_samples_dir_is_the_repository_folder_or_the_environment_variable():
 def test_list_samples_follows_the_manifest():
     names = S.list_samples()
     assert names == [entry["name"] for entry in S.manifest()["samples"]]
-    assert names[:3] == ["snemi3d", "cremi_a", "fib25"]
-    assert len(names) == len(set(names)) == 8
+    assert names[:3] == ["snemi3d", "cremi_a", "fib25"]            # the core samples come first
+    assert len(names) == len(set(names))
+    for entry in S.manifest()["samples"]:
+        assert (S.samples_dir() / entry["file"]).is_file(), entry["file"]
 
 
 def test_loading_does_not_depend_on_the_working_directory_and_leaves_the_file_alone():
@@ -273,7 +275,8 @@ def test_every_sample_in_the_manifest_loads_with_its_declared_grid():
         v = s.voxvalue()
         assert v.dtype == np.float32 and 0.0 <= v.min() and v.max() <= 1.0, entry["name"]
         if s.has_instances:
-            n = entry["labels"]["n_instances"]
+            n = s.attrs["n_instances"]
+            assert n == int(s.instance.max()), entry["name"]
             assert np.array_equal(s.instance_ids(), np.arange(1, n + 1)), entry["name"]     # 1 = largest
             assert len(s.skeleton_subjects) == 3, entry["name"]
             assert all(1 <= i <= n for i in s.skeleton_subjects), entry["name"]

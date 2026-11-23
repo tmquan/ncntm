@@ -375,7 +375,8 @@ def test_chiral_object_is_not_mirrored_in_any_representation():
     mesh = C.instance_to_mesh(mask, grid)
     bricks = C.instance_to_bricks(mask, grid)
     gaussians = C.instance_to_gaussians(mask, grid, k=24)
-    for name, points in (("mesh", mesh.vertices_xyz_nm), ("bricks", bricks.centers_xyz_nm), ("gaussians", gaussians.means_xyz_nm)):
+    clouds = (("mesh", mesh.vertices_xyz_nm), ("bricks", bricks.centers_xyz_nm), ("gaussians", gaussians.means_xyz_nm))
+    for name, points in clouds:
         assert handedness(points, elbow) > 0, name
         # each arm is where the array has it: x arm at low y and z, y arm at low x and z, peg at low x and y
         far_x, far_y, high_z = points[points[:, 0] > 200.0], points[points[:, 1] > 200.0], points[points[:, 2] > 215.0]
@@ -578,7 +579,8 @@ def test_ignoring_anisotropy_turns_the_principal_axis():
     assert angle_deg(long_axis(wrong), rot[:, 0]) > 40.0
     # with one part, the two "scaled" variants are this mistake and the two "transformed" ones are right
     ways = C.gaussians_wrong_ways(mask, grid, k=1)
-    assert set(ways) == {"correct", "index_fit_scaled", "index_fit_transformed", "same_clusters_scaled", "same_clusters_transformed"}
+    assert set(ways) == {"correct", "index_fit_scaled", "index_fit_transformed",
+                         "same_clusters_scaled", "same_clusters_transformed"}
     for name, g in ways.items():
         assert np.allclose(g.means_xyz_nm[0], centre, atol=0.5), name          # means are always physical
         if name.endswith("_scaled"):

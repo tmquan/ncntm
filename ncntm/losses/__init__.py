@@ -15,7 +15,7 @@ The public loss surface is intentionally small:
 * :class:`Joint3DReconSegLoss` is the joint reconstruction + segmentation
   loss (tasks ``ssl`` and ``sft``) on that same head.  Training configs
   use 30 affinity offsets, so the head is 32 channels (affinities + sem
-  + raw).  Pretrain (``configs/pretrain.yaml``) sets
+  + raw).  Pretrain (``configs/pretrain_snemi3d.yaml``) sets
   ``recon_loss="l1"``, ``weight_rec=1``, ``weight_dif=1``,
   ``weight_ssl=5``, ``weight_seg=0``, ``weight_sft=0``.
   ``weight_dif`` scales the rectified-flow MSE on ``proj_out`` next to

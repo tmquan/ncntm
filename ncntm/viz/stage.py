@@ -120,7 +120,8 @@ _VIRIDIS = ("440154 48186a 472d7b 424086 3b528b 33638d 2c728e 26828e 21918c "
 def colormap_rgb8(name: str) -> np.ndarray:
     """(256, 3) uint8 table for a value t in [0, 1] at row round(255 t).
     "grey": row v is (v, v, v).  "viridis": a perceptual map (dark blue -> green -> yellow)
-    whose luminance rises with t, so it cannot be mistaken for the grey rawvalue."""
+    whose luminance rises with t (strictly from any row to the next but one; single rows
+    are limited by 8-bit rounding).  No row is a grey, so it cannot be mistaken for rawvalue."""
     if name == "grey":
         return np.repeat(np.arange(256, dtype=np.uint8)[:, None], 3, axis=1)
     if name == "viridis":
@@ -689,8 +690,6 @@ class Dataset:
         """Give a gprim its colour twice: as primvars:displayColor (read by the Warp adapter and
         by viewers without materials) and as a bound material (what RTX shades with)."""
         color = _rgb(color)
-        if not 0.0 < opacity <= 1.0:
-            raise ValueError(f"opacity must be in (0, 1], got {opacity}")
         gprim.CreateDisplayColorAttr([Gf.Vec3f(*srgb_to_linear(color))])
         if opacity < 1.0:
             gprim.CreateDisplayOpacityAttr([float(opacity)])
@@ -745,54 +744,54 @@ class Dataset:
         if int(upsample) < 1:
             raise ValueError("upsample must be a positive integer")
         nx, ny, nz = (int(n) for n in self.grid.shape_xyz)
-        window = self.norm_window if kind == "voxvalue" else (0.0, 255.0)
-        lut = None if kind == "instance" else slice_lut8(colormap, window)
-
-        prims = []
-        for axis, indices in (("z", z), ("y", y), ("x", x)):
+        wanted = []                                             # every index is checked before anything is authored
+        for axis, indices, n_axis in (("z", z, nz), ("y", y, ny), ("x", x, nx)):
             for index in np.atleast_1d(indices if indices is not None else []).tolist():
-                n_axis = {"z": nz, "y": ny, "x": nx}[axis]
                 if index != int(index) or not 0 <= index < n_axis:
                     raise IndexError(f"{axis} = {index} is outside 0 .. {n_axis - 1}")
-                index, c = int(index), int(index) + 0.5
-                if axis == "z":      # image = volume[k]        rows = y, columns = x
-                    image, corners = volume[index], [(0, 0, c), (nx, 0, c), (nx, ny, c), (0, ny, c)]
-                elif axis == "y":    # image = volume[:, j, :]  rows = z, columns = x
-                    image, corners = volume[:, index, :], [(0, c, 0), (nx, c, 0), (nx, c, nz), (0, c, nz)]
-                else:                # image = volume[:, :, i]  rows = z, columns = y
-                    image, corners = volume[:, :, index], [(c, 0, 0), (c, ny, 0), (c, ny, nz), (c, 0, nz)]
-                name = f"slice_{axis}{index:04d}"
-                mesh = UsdGeom.Mesh.Define(self.stage, self._new_prim_path(kind, self.voxels, name))
-                mesh.CreatePointsAttr(_vec3f(corners))
-                mesh.CreateFaceVertexCountsAttr([4])
-                mesh.CreateFaceVertexIndicesAttr([0, 1, 2, 3])
-                mesh.CreateSubdivisionSchemeAttr(UsdGeom.Tokens.none)       # no normals authored
-                mesh.CreateDoubleSidedAttr(True)
-                mesh.CreateExtentAttr(_extent(corners))
-                st = UsdGeom.PrimvarsAPI(mesh).CreatePrimvar("st", _T.TexCoord2fArray, UsdGeom.Tokens.vertex)
-                st.Set(Vt.Vec2fArray([Gf.Vec2f(0, 1), Gf.Vec2f(1, 1), Gf.Vec2f(1, 0), Gf.Vec2f(0, 0)]))
-                prim = mesh.GetPrim()
-                for key, type_name, value in (
-                    ("em:kind", _T.Token, "slice"),
-                    ("em:slice:kind", _T.Token, kind),
-                    ("em:slice:dataset", _T.Token, dataset),             # HDF5 dataset name
-                    ("em:slice:axis", _T.Token, axis),                   # array axis the slice is normal to
-                    ("em:slice:index", _T.Int, index),
-                    ("em:slice:colorMap", _T.Token, colormap),
-                    ("em:slice:window", _T.Double2, Gf.Vec2d(*window)),  # stored numbers mapped to 0 and 1
-                ):
-                    prim.CreateAttribute(key, type_name).Set(value)
-                if textures:
-                    rgb = label_rgb8(image) if kind == "instance" else lut[image]
-                    k = int(upsample)
-                    file_name = f"{self.name}_{kind}_{axis}{index:04d}.png"
-                    os.makedirs(self._texture_dir(), exist_ok=True)
-                    write_png(os.path.join(self._texture_dir(), file_name), np.repeat(np.repeat(rgb, k, axis=0), k, axis=1))
-                    material = self._material(f"{kind}_{axis}{index:04d}", texture=f"./textures/{file_name}")
-                    UsdShade.MaterialBindingAPI.Apply(prim).Bind(material)
-                prims.append(prim)
-        if not prims:
+                wanted.append((axis, int(index)))
+        if not wanted:
             raise ValueError("add_slices: give at least one of z=, y=, x=")
+        texture_dir = self._texture_dir() if textures else None
+        window = self.norm_window if kind == "voxvalue" else (0.0, 255.0)
+
+        prims = []
+        for axis, index in wanted:
+            c = index + 0.5                                     # the centre of voxel layer `index`
+            if axis == "z":      # image = volume[k]        rows = y, columns = x
+                image, corners = volume[index], [(0, 0, c), (nx, 0, c), (nx, ny, c), (0, ny, c)]
+            elif axis == "y":    # image = volume[:, j, :]  rows = z, columns = x
+                image, corners = volume[:, index, :], [(0, c, 0), (nx, c, 0), (nx, c, nz), (0, c, nz)]
+            else:                # image = volume[:, :, i]  rows = z, columns = y
+                image, corners = volume[:, :, index], [(c, 0, 0), (c, ny, 0), (c, ny, nz), (c, 0, nz)]
+            mesh = UsdGeom.Mesh.Define(self.stage, self._new_prim_path(kind, self.voxels, f"slice_{axis}{index:04d}"))
+            mesh.CreatePointsAttr(_vec3f(corners))
+            mesh.CreateFaceVertexCountsAttr([4])
+            mesh.CreateFaceVertexIndicesAttr([0, 1, 2, 3])
+            mesh.CreateSubdivisionSchemeAttr(UsdGeom.Tokens.none)       # no normals authored
+            mesh.CreateDoubleSidedAttr(True)
+            mesh.CreateExtentAttr(_extent(corners))
+            st = UsdGeom.PrimvarsAPI(mesh).CreatePrimvar("st", _T.TexCoord2fArray, UsdGeom.Tokens.vertex)
+            st.Set(Vt.Vec2fArray([Gf.Vec2f(0, 1), Gf.Vec2f(1, 1), Gf.Vec2f(1, 0), Gf.Vec2f(0, 0)]))
+            prim = mesh.GetPrim()
+            for key, type_name, value in (
+                ("em:kind", _T.Token, "slice"),
+                ("em:slice:kind", _T.Token, kind),
+                ("em:slice:dataset", _T.Token, dataset),             # HDF5 dataset name
+                ("em:slice:axis", _T.Token, axis),                   # array axis the slice is normal to
+                ("em:slice:index", _T.Int, index),
+                ("em:slice:colorMap", _T.Token, colormap),
+                ("em:slice:window", _T.Double2, Gf.Vec2d(*window)),  # stored numbers mapped to 0 and 1
+            ):
+                prim.CreateAttribute(key, type_name).Set(value)
+            if textures:
+                rgb = label_rgb8(image) if kind == "instance" else slice_lut8(colormap, window)[image]
+                file_name = f"{self.name}_{kind}_{axis}{index:04d}.png"
+                os.makedirs(texture_dir, exist_ok=True)
+                write_png(os.path.join(texture_dir, file_name), rgb.repeat(int(upsample), axis=0).repeat(int(upsample), axis=1))
+                material = self._material(f"{kind}_{axis}{index:04d}", texture=f"./textures/{file_name}")
+                UsdShade.MaterialBindingAPI.Apply(prim).Bind(material)
+            prims.append(prim)
         return prims
 
     # ---- instance: bricks and surface ------------------------------------------------------------
@@ -814,12 +813,13 @@ class Dataset:
         if not (np.isfinite(size).all() and size.min() > 0):
             raise ValueError(f"bricks.size_xyz_nm must be three positive numbers, got {bricks.size_xyz_nm}")
         centers = centers / d                                                             # index units
+        color = self._instance_color(color, bricks.instance_id)
         name = name or f"bricks_{int(bricks.instance_id)}"
         instancer = UsdGeom.PointInstancer.Define(self.stage, self._new_prim_path("instance", self.voxels, name))
         cube = UsdGeom.Cube.Define(self.stage, instancer.GetPath().AppendChild("proto_cube"))
         cube.CreateSizeAttr(1.0)
         cube.CreateExtentAttr([(-0.5, -0.5, -0.5), (0.5, 0.5, 0.5)])
-        self._paint(cube, self._instance_color(color, bricks.instance_id))
+        self._paint(cube, color)
         instancer.CreatePrototypesRel().SetTargets([cube.GetPath()])
         instancer.CreateProtoIndicesAttr(Vt.IntArray(len(centers), 0))
         instancer.CreatePositionsAttr(_vec3f(centers))
@@ -845,6 +845,9 @@ class Dataset:
         have to be transformed by the inverse transpose, and a renderer that shades from the
         transformed triangles cannot get that wrong.  ``opacity`` < 1 makes it see-through."""
         vertices, faces = self._mesh_arrays(mesh)
+        if not 0.0 < opacity <= 1.0:
+            raise ValueError(f"opacity must be in (0, 1], got {opacity}")
+        color = self._instance_color(color, mesh.instance_id)
         points = vertices / self.grid.voxel_size_xyz_nm
         name = name or f"surface_{int(mesh.instance_id)}"
         gprim = UsdGeom.Mesh.Define(self.stage, self._new_prim_path("instance", self.voxels, name))
@@ -854,7 +857,7 @@ class Dataset:
         gprim.CreateSubdivisionSchemeAttr(UsdGeom.Tokens.none)      # the fallback, catmullClark, would smooth it
         gprim.CreateDoubleSidedAttr(True)
         gprim.CreateExtentAttr(_extent(points))
-        self._paint(gprim, self._instance_color(color, mesh.instance_id), opacity)
+        self._paint(gprim, color, opacity)
         prim = gprim.GetPrim()
         prim.CreateAttribute("em:kind", _T.Token).Set("surface")
         prim.CreateAttribute("em:instanceId", _T.Int).Set(int(mesh.instance_id))
@@ -900,7 +903,7 @@ class Dataset:
             width_nm = 0.001 * float(np.linalg.norm(self.grid.extent_xyz_nm))
         if not width_nm > 0:
             raise ValueError(f"width_nm must be positive, got {width_nm}")
-        color = 0.55 * self._instance_color(None, mesh.instance_id) if color is None else color
+        color = _rgb(0.55 * self._instance_color(None, mesh.instance_id) if color is None else color)
         curves = self._add_tubes("wiremesh", name or f"wire_{int(mesh.instance_id)}", vertices, edges,
                                  0.5 * float(width_nm), color, "wire")
         prim = curves.GetPrim()
@@ -927,6 +930,7 @@ class Dataset:
             raise ValueError("skeleton.radii_nm must be one positive finite radius per node")
         if edges.min() < 0 or edges.max() >= len(vertices):
             raise ValueError("skeleton.edges refers to nodes that do not exist")
+        color, branch_color, end_color = _rgb(color), _rgb(branch_color), _rgb(end_color)
         tag = name or str(int(skeleton.instance_id))
         tubes = self._add_tubes("skeleton", f"tubes_{tag}", vertices, edges, radii, color, "tubes").GetPrim()
         tubes.CreateAttribute("em:instanceId", _T.Int).Set(int(skeleton.instance_id))
@@ -1135,6 +1139,7 @@ class Dataset:
         bar_nm = nice_length_nm(extent[0]) if bar_nm is None else float(bar_nm)
         if not bar_nm > 0:
             raise ValueError("bar_nm must be positive")
+        color = _rgb(color)
         corners = _box_points(np.zeros(3), extent)
 
         def box_points(space):
