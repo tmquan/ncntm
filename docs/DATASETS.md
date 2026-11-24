@@ -14,10 +14,13 @@
 
 Files live in `data/SNEMI3D/` (not tracked by git), HDF5 key `main`, array order (z, y, x), uint8
 images. Image files are tagged by contrast: `_em_` = uncorrected intensities from BossDB
-`Kasthuri/em/images` (slice-mean brightness swings ~20 grey levels between neighbouring slices);
+`Kasthuri/em/images` (slice-mean brightness steps by a median ~15-17 grey levels between neighbouring slices, max ~80);
 `_cc_` = contrast-corrected `kasthuri2015/em/cc` (flat per-slice brightness). Label files carry no
 tag and pair with both versions. Coordinates are 6 nm voxels in the Kasthuri et al. (2015) volume as
-served by BossDB; z is the slice index of the named layer.
+served by BossDB; z is the slice index of the named layer. x and y ranges below are half-open
+`[start, end)`; the AC3/AC4 z ranges list the first and last slice (inclusive), the cylinder and
+cropping z are `[start, start + depth)`. `notebooks/data_SNEMI3D.ipynb` re-checks this page against
+the files.
 
 | Name | Image | Labels |
 |---|---|---|
@@ -44,12 +47,13 @@ AC3/AC4 bounding boxes use the `cc` numbering). Within that mapping the residual
   `AC3_em_inputs.h5`. `train_em_inputs.h5` equals `AC4_em_inputs.h5` except slice 33 (a near-copy of
   slice 34), and `train_labels.h5` is `AC4_labels.h5` with wider background borders (15 % vs 10 %).
 - **Kasthuri cylinder**: offset (x, y, z) = (3000, 7200, 950) in `kasthuri2015/em/cc`. Labels are a
-  crop of `kasthuri2015/em/3cylneuron_v1`; only ~26 % of voxels are labelled and 55 of 300 slices
-  have none.
+  crop of `kasthuri2015/em/3cylneuron_v1`; labels cover ~42 % of voxels (8-64 % per slice) and every
+  slice has some. The image matches `cc` at that offset with NCC 0.995 (mean |diff| 2.6 grey levels), not byte-for-byte;
+  its `.norm.json` max is 251, but the data reaches 255, so the norm does not cover values 252-255.
 - **Kasthuri cropping**: largest crop with tissue in every voxel across all slices of
   `kasthuri2015/em/cc`: x 2512-8416, y 4432-9248, z 0-1848. Raw only, stored uncompressed with
   (16, 256, 256) chunks. Slice 432 has a section defect (a ~0.6 % black blob near x 4450-5070,
-  y 340-975 in crop coordinates).
+  y 580-975 in crop coordinates).
 
 **COSEM3D** (`data/COSEM3D/`, HDF5 key `main`, array order (z, y, x), uint8, each with a `.norm.json` sidecar
 holding min 0 / max 255): only the true 4 x 4 x 4 nm cubic files (`*_4nm_*`) are copied from
