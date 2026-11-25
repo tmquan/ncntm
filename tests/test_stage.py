@@ -7,8 +7,8 @@ Three stages are built once and shared by the tests:
     real()     samples/snemi3d.h5 with every layer for its first skeleton subject
     phantom()  a 13 x 11 x 7 voxel volume of 6 x 8 x 30 nm (every size different) whose expected
                positions, lengths and covariances are written out by hand in the tests
-Two more samples, cremi_a (10:1) and fib25 (isotropic), are checked if they are in the samples
-directory; snemi3d must be there.
+Two more samples, cremi_a (10:1) and fib25 (isotropic), are checked as well.  The three core
+samples must be in the samples directory: a missing one is a failure that names NCNTM_SAMPLES.
 
 Environment
     NCNTM_SAMPLES    directory of the sample files (default <repository>/samples)
@@ -330,59 +330,13 @@ def test_write_png_round_trips():
     assert raises(ValueError, S.write_png, path, rgb[..., 0])
 
 
-def test_tube_width_factor():
-    grid = VoxelGrid((100, 512, 512), (30.0, 6.0, 6.0))                     # SNEMI3D: A = (1, 1, 1/5)
-    o = np.zeros((1, 3))
-    along = {axis: np.eye(3)[[k]] * 100.0 for k, axis in enumerate("xyz")}
-    for axis in "xyz":
-        assert S.tube_width_factor(grid, "physical", o, along[axis])[0] == 1.0
-    assert abs(S.tube_width_factor(grid, "index", o, along["z"])[0] - 1.0) < 1e-12        # cross-section in x, y
-    for axis in "xy":
-        assert abs(S.tube_width_factor(grid, "index", o, along[axis])[0] - math.sqrt(1 / 5)) < 1e-12
-    assert abs(math.sqrt(1 / 5) - 0.447) < 5e-4
-    diagonal = S.tube_width_factor(grid, "index", o, np.array([[70.0, 0.0, 70.0]]))[0]     # 45 degrees between x and z
-    assert abs(diagonal - 0.527) < 5e-4
-    assert np.isfinite(S.tube_width_factor(grid, "index", o, o)[0])          # an edge of length zero
-    # The drawn tube keeps the volume of the image of the true tube, for any direction and any
-    # voxel size: (width factor)^2 * (length as drawn) = det(A) * (true length).
-    for size_zyx in ((30.0, 6.0, 6.0), (30.0, 8.0, 6.0), (40.0, 4.0, 4.0), (8.0, 8.0, 8.0)):
-        other = VoxelGrid((4, 4, 4), size_zyx)
-        a = other.space_scale("index")
-        rng = np.random.default_rng(2)
-        p0, p1 = rng.normal(size=(50, 3)) * 100.0, rng.normal(size=(50, 3)) * 100.0
-        factor = S.tube_width_factor(other, "index", p0, p1)
-        true_length, drawn_length = np.linalg.norm(p1 - p0, axis=1), np.linalg.norm((p1 - p0) * a, axis=1)
-        assert np.allclose(factor ** 2 * drawn_length, np.prod(a) * true_length, rtol=1e-12)
-        assert np.array_equal(S.tube_width_factor(other, "physical", p0, p1), np.ones(50))
-    # The same by brute force, without the formula: fill a tube of radius 1 with points, move them
-    # with A, and measure the area of the cross-section perpendicular to the moved axis.
-    a = VoxelGrid((4, 4, 4), (30.0, 8.0, 6.0)).space_scale("index")          # (1, 0.75, 0.2)
-    rng = np.random.default_rng(5)
-    for t in ((1.0, 0.0, 1.0), (1.0, 1.0, 1.0), (0.2, 0.1, 1.0)):
-        t = np.array(t) / np.linalg.norm(t)
-        u = np.cross(t, [0.3, 0.5, 0.7])
-        u /= np.linalg.norm(u)
-        v = np.cross(t, u)
-        n = 200000
-        r, phi, s = np.sqrt(rng.random(n)), rng.random(n) * 2.0 * np.pi, rng.random(n) * 10.0
-        moved = (s[:, None] * t + (r * np.cos(phi))[:, None] * u + (r * np.sin(phi))[:, None] * v) * a
-        axis = a * t / np.linalg.norm(a * t)
-        e1 = np.cross(axis, [0.3, 0.5, 0.7])
-        e1 /= np.linalg.norm(e1)
-        e2 = np.cross(axis, e1)
-        section = np.stack([moved @ e1, moved @ e2])               # points of a uniformly filled ellipse
-        area_ratio = 4.0 * math.sqrt(np.linalg.det(np.cov(section)))          # its area / pi
-        factor = S.tube_width_factor(VoxelGrid((4, 4, 4), (30.0, 8.0, 6.0)), "index", o, t[None])[0]
-        assert abs(factor ** 2 - area_ratio) < 0.01 * area_ratio, (t, factor ** 2, area_ratio)
-
-
 def test_round_scale_bar_lengths():
     assert S.nice_length_nm(3072.0) == 500.0            # a quarter of 3072 is 768
     assert S.nice_length_nm(800.0) == 200.0
     assert S.nice_length_nm(4000.0) == 1000.0
     assert S.nice_length_nm(8.0, fraction=1.0) == 5.0
     assert raises(ValueError, S.nice_length_nm, 0.0)
-    assert S.format_length(500.0) == "500 nm" and S.format_length(2000.0) == "2 um"
+    assert S.format_length_nm(500.0) == "500 nm" and S.format_length_nm(2000.0) == "2 um"
 
 
 # ---- stage metadata and layout ----------------------------------------------------------------
@@ -709,10 +663,10 @@ def test_wiremesh_and_skeleton_tubes():
     order = s.edges.reshape(-1)
     for space in SPACES:
         t.ds.set_space(space)
-        factor = S.tube_width_factor(t.grid, space, s.vertices_xyz_nm[s.edges[:, 0]], s.vertices_xyz_nm[s.edges[:, 1]])
+        factor = t.grid.tube_width_factor(s.vertices_xyz_nm[s.edges[:, 0]], s.vertices_xyz_nm[s.edges[:, 1]], space)
         assert np.allclose(np.array(tubes.GetWidthsAttr().Get()), 2.0 * s.radii_nm[order] * np.repeat(factor, 2), rtol=1e-6)
         assert np.abs(np.array(tubes.GetPointsAttr().Get()) - t.grid.to_space(s.vertices_xyz_nm, space)[order]).max() < 1e-3
-        wire_factor = S.tube_width_factor(t.grid, space, t.mesh.vertices_xyz_nm[edges[:, 0]], t.mesh.vertices_xyz_nm[edges[:, 1]])
+        wire_factor = t.grid.tube_width_factor(t.mesh.vertices_xyz_nm[edges[:, 0]], t.mesh.vertices_xyz_nm[edges[:, 1]], space)
         assert np.allclose(np.array(wire.GetWidthsAttr().Get()), default_width * np.repeat(wire_factor, 2), rtol=1e-6)
         assert np.abs(np.array(wire.GetPointsAttr().Get()) - t.grid.to_space(t.mesh.vertices_xyz_nm, space)[edges.reshape(-1)]).max() < 1e-3
     t.ds.set_space("physical")
@@ -1742,6 +1696,43 @@ def test_phantom_tubes_and_nodes_have_their_radius_in_nanometres():
     print("\n  " + "\n  ".join(report))
 
 
+def test_skeleton_drawn_from_the_stage_is_the_skeleton_the_ray_caster_draws_itself():
+    """Two roads to one skeleton: (a) Skeleton -> USD stage -> adapter -> emray and (b) the same
+    Skeleton given to emray.Scene.add_skeleton.  Both use the one rule for round tubes in a display
+    space, grid.tube_width_factor, and squash the node spheres with A; so they agree in both spaces.
+    (With the stage's marker_scale of 1: the direct drawing does not enlarge branch and end points.)"""
+    U, emray = need("ncntm.viz.usd_to_emray", "ncntm.viz.emray")
+    # a branch point at node 1 with edges along x, y, z and one oblique edge; every radius different
+    nodes_nm = np.array([[12.0, 44.0, 105.0], [42.0, 44.0, 105.0], [42.0, 76.0, 105.0], [42.0, 44.0, 195.0], [72.0, 20.0, 45.0]])
+    skeleton = Skeleton(nodes_nm, np.array([[0, 1], [1, 2], [1, 3], [1, 4]], dtype=np.int32),
+                        np.array([5.0, 9.0, 6.0, 7.0, 4.0]), instance_id=4)
+    stage = S.new_stage(tmp_dir() / "skeleton" / "skeleton.usda")
+    ds = S.Dataset(stage, "skeleton", PHANTOM_GRID)
+    ds.add_skeleton(skeleton, marker_scale=1.0)
+    report = []
+    for space, size, a in phantom_spaces():
+        ds.set_space(space)
+        camera = emray.Camera.fit(np.zeros(3), np.array([13, 11, 7]) * size / 1000.0, direction=(0.7, -1.0, 0.5),
+                                  width=480, height=360, ssaa=1)
+        seen = U.build_scene(stage, tube_sides=10, sphere_subdiv=1).render(camera)       # the tessellation of add_skeleton
+        direct = emray.Scene()
+        direct.add_skeleton(skeleton, PHANTOM_GRID, space, min_pixels=0.0)
+        expected = direct.render(camera)
+        hit, hit_direct = np.isfinite(seen.depth), np.isfinite(expected.depth)
+        both = hit & hit_direct
+        assert hit.mean() > 0.01
+        differing = int(np.count_nonzero(hit != hit_direct))
+        assert differing <= 0.002 * hit.sum(), (space, differing, int(hit.sum()))      # the same silhouette
+        depth = np.abs(seen.depth[both] - expected.depth[both])
+        assert np.quantile(depth, 0.99) < 1e-6 and depth.max() < 2e-3, (space, depth.max())       # micrometres
+        report.append(f"{space:8s}: {int(hit.sum())} pixels, {differing} differ, depth differs by at most {depth.max():.1e} um")
+        # and the widths are those of the rule: along x and y sqrt(det A / a_axis) times the radius, along z sqrt(det A / a_z)
+        factor = PHANTOM_GRID.tube_width_factor(nodes_nm[skeleton.edges[:, 0]], nodes_nm[skeleton.edges[:, 1]], space)
+        assert np.allclose(factor[:3], np.sqrt(np.prod(a) / a))
+    ds.set_space("physical")
+    print("\n  " + "\n  ".join(report))
+
+
 def test_usd_camera_and_warp_camera_project_alike():
     """author_camera and camera_from_stage against USD's own camera mathematics (Gf.Frustum)."""
     U = need("ncntm.viz.usd_to_emray")
@@ -1857,14 +1848,7 @@ def check_other_sample(name, physical_um, index_um, rows_per_section):
     the HDF5 file through em:voxelOffset, looked at with emray.Camera.for_slice."""
     samples, U, emray = need("ncntm.viz.samples", "ncntm.viz.usd_to_emray", "ncntm.viz.emray")
     need("h5py")
-    if name not in samples.list_samples():
-        message = f"sample {name} is not in the samples directory"
-        if "PYTEST_CURRENT_TEST" in os.environ:
-            import pytest
-
-            pytest.skip(message)
-        raise Skip(message)
-    sample = samples.load_sample(name)
+    sample = samples.load_sample(name)             # a core sample: its absence is an error, not a skip
     stage = S.new_stage(tmp_dir() / name / f"{name}.usda")
     whole = S.Dataset.from_sample(stage, sample, name="whole")
     far_corner = np.array([*sample.raw.shape[::-1], 1.0])                          # (nx, ny, nz, 1): index units

@@ -58,7 +58,9 @@ class Skeleton:
 
     vertices_xyz_nm: np.ndarray        # (N, 3) float
     edges: np.ndarray                  # (E, 2) int32 indices into vertices
-    radii_nm: np.ndarray               # (N,)   float distance from node to the nearest boundary
+    radii_nm: np.ndarray               # (N,)   float distance from the node (a voxel centre) to the CENTRE of the
+    #                                             nearest voxel outside the instance: about half a voxel more than
+    #                                             the distance to the surface (see convert.instance_to_skeleton)
     instance_id: int = 0
 
     def cable_length_nm(self) -> float:

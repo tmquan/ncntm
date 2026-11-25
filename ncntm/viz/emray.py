@@ -952,9 +952,15 @@ class Scene:
                     on screen, whatever the zoom (each face draws half of the line on its side of
                     the edge).  The geometry is unchanged; the picture is no longer to scale for the
                     line width.  May be used with ``wire_width=0``: lines of constant pixel width.
+
+    Two dictionaries are free for whoever fills the scene; the renderer never reads them:
+    ``objects``     {object id: description}: what the numbers of the object-id buffer mean
+                    (``usd_to_emray.build_scene`` writes {"path", "layer", "type"} of each prim)
+    ``skipped``     {reason: [names]}: what could not be drawn
     """
 
     def __init__(self):
+        self.objects, self.skipped = {}, {}
         self._vol = ([], [], [])                # packed voxel stores: uint8, uint16, int32
         self._vol_size = [0, 0, 0]
         self._vol_ids = {}
@@ -1423,7 +1429,8 @@ class Scene:
     # space_scale is (1, 1, 1) for "physical" and (g/dx, g/dy, g/dz) for "index" (voxels drawn as
     # cubes of the in-plane pixel size g): that factor is the whole difference between the spaces.
     # It applies to every point of a drawn surface, so sizes are squashed with the positions: a
-    # brick becomes a cube, a round skeleton tube an elliptical one, a covariance S becomes A S A.
+    # brick becomes a cube, a covariance S becomes A S A.  The one exception is the round tube of
+    # a skeleton, which a USD curve cannot squash: see add_skeleton.
     def add_volume_grid(self, data_zyx, grid, space="physical", lut=None, labels=False, interp="nearest",
                         zero_alpha=0.0, focus=-1, grid_lines=0.0, grid_color=(1.0, 0.85, 0.0)):
         """Register ``data_zyx`` on a ``VoxelGrid`` (CORNER convention): voxel ``[k,j,i]`` is drawn as
@@ -1478,24 +1485,55 @@ class Scene:
         return self.add_mesh(v, mesh.faces, color=color, wire_color=wire_color, wire_width=wire_width,
                              wire_min_pixels=wire_min_pixels, **style)
 
-    def add_skeleton(self, skeleton, grid, space="physical", radius=None, min_pixels=1.5, **style):
-        """*skeleton* (``types.Skeleton``): edges as tubes with round joints.  ``radius`` is the tube
-        radius, a PHYSICAL length in scene units (micrometres), one value or one per node;
-        ``None`` uses the measured ``skeleton.radii_nm`` (distance to the instance boundary).
+    def add_skeleton(self, skeleton, grid, space="physical", radius=None, min_pixels=1.5, exact=False, **style):
+        """*skeleton* (``types.Skeleton``): one tube per edge and a joint on every node.  ``radius``
+        is the tube radius, a PHYSICAL length in scene units (micrometres), one value or one per
+        node; ``None`` uses the measured ``skeleton.radii_nm`` (see ``types.Skeleton``).
+        ``color`` / ``object_id`` may hold one value per edge.
 
-        The tubes are built round in physical space and then moved into ``space`` like every
-        other representation: every point of their surface is multiplied by
-        ``grid.space_scale(space)``.  In "physical" space nothing changes.  In "index" space the
-        tubes are squashed together with the voxels, so they stay inside their instance: with
-        6 x 6 x 30 nm voxels a tube of 15 nm radius along x is 30 nm wide (y) and 6 nm high (z).
+        "physical" space: round tubes of that radius with a sphere on every node.
+
+        "index" space: the nodes move like every other point, p -> A p with
+        A = ``grid.space_scale(space)``.  A radius is a physical length and has no meaning there,
+        so there are two pictures:
+
+        ``exact=False`` (default): what the USD stage draws (``stage.Dataset.add_skeleton``, and
+            therefore RTX): ROUND tubes, each edge with its width scaled by
+            ``grid.tube_width_factor`` (the round tube with the volume of the exact image), and
+            the node spheres as the ellipsoids A maps them to.  With 6 x 6 x 30 nm voxels a tube
+            of 15 nm radius along x is drawn with 15 * sqrt(1/5) = 6.7 nm radius: narrower than
+            the exact image across the section plane and higher along z, so it can stand out of
+            its squashed instance.
+        ``exact=True``: the exact image of the physical tubes: every point of their surface is
+            multiplied by A, so the cross-sections become ellipses (that tube: 30 nm wide in y,
+            6 nm high in z) and the skeleton stays inside its squashed instance.
+
         ``min_pixels`` keeps thin tubes visible at any zoom (display aid, see :meth:`add_tubes`)."""
-        if len(skeleton.edges) == 0:
+        e = np.asarray(skeleton.edges, np.int64).reshape(-1, 2)
+        if len(e) == 0:
             raise ValueError("the skeleton has no edges to draw")
-        p = np.asarray(skeleton.vertices_xyz_nm, np.float64) / NM_PER_UNIT         # true physical positions, scene units
+        p_nm = np.asarray(skeleton.vertices_xyz_nm, np.float64).reshape(-1, 3)      # true physical positions
         if radius is None:
             radius = np.asarray(skeleton.radii_nm, np.float64) / NM_PER_UNIT
-        return self.add_tubes(p, skeleton.edges, radius, caps="round", min_pixels=min_pixels,
-                              stretch=grid.space_scale(space), **style)             # (1, 1, 1) in physical space
+        a = grid.space_scale(space)                                                 # (1, 1, 1) in physical space
+        if exact or space == "physical":
+            return self.add_tubes(p_nm / NM_PER_UNIT, e, radius, caps="round", min_pixels=min_pixels, stretch=a, **style)
+        if e.min() < 0 or e.max() >= len(p_nm):
+            raise ValueError(f"edge indices must lie in 0..{len(p_nm) - 1}, got {e.min()}..{e.max()}")
+        if np.ndim(radius) > 1 or (np.ndim(radius) == 1 and len(radius) != len(p_nm)):
+            raise ValueError(f"radius must be one number or one per node ({len(p_nm)}), got shape {np.shape(radius)}")
+        r = np.broadcast_to(np.asarray(radius, np.float64), (len(p_nm),))
+        # one round tube per edge, as on the stage: both ends are the edge's own points, so that
+        # an edge along x and an edge along z that meet in a node can have different widths there
+        factor = grid.tube_width_factor(p_nm[e[:, 0]], p_nm[e[:, 1]], space)        # (E,)
+        ends = (p_nm * a / NM_PER_UNIT)[e].reshape(-1, 3)                           # (2 E, 3): A p in scene units
+        nf = self.add_tubes(ends, np.arange(2 * len(e)).reshape(-1, 2), (r[e] * factor[:, None]).reshape(-1),
+                            caps="flat", min_pixels=min_pixels, **style)
+        used = np.unique(e)
+        owner = np.zeros(len(p_nm), np.int64)           # a joint takes the style of the first edge that uses it
+        owner[e[::-1].ravel()] = np.repeat(np.arange(len(e))[::-1], 2)
+        return nf + self.add_spheres(p_nm[used] / NM_PER_UNIT, r[used], subdiv=1, min_pixels=min_pixels, stretch=a,
+                                     **_style_take(style, owner[used]))
 
     def add_gaussian_mixture(self, gaussians, grid, space="physical", opacity=0.8, color=None, object_id=0,
                              sigma_surface=None):

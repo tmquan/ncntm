@@ -12,7 +12,6 @@ asymmetric phantom of 11 x 7 x 5 voxels of 6 x 8 x 30 nm, where x and y differ a
 """
 import io
 import math
-import os
 import sys
 from pathlib import Path
 
@@ -29,13 +28,13 @@ wp.config.quiet = True
 
 from ncntm.viz import emray as E  # noqa: E402
 from ncntm.viz import figure as F  # noqa: E402
+from ncntm.viz import samples as SM  # noqa: E402
 from ncntm.viz.grid import NM_PER_UNIT, SPACES, VoxelGrid  # noqa: E402
 from ncntm.viz.types import Bricks, Gaussians, Mesh, Skeleton  # noqa: E402
 
 DEVICE = E.default_device()
 ON_CPU = DEVICE == "cpu"
 needs_cuda = pytest.mark.skipif(ON_CPU, reason="needs a CUDA device (this run uses the CPU device)")
-SAMPLES = Path(os.environ.get("NCNTM_SAMPLES", REPO / "samples"))
 
 RNG = np.random.default_rng(7)
 EM = RNG.integers(0, 256, (12, 20, 28), dtype=np.uint8)            # rawvalue [z, y, x]
@@ -599,9 +598,9 @@ def test_clear_geometry_keeps_the_volumes_on_the_device():
 def test_sample_file_slices_are_exact_in_both_spaces(name):
     """The same statement on a crop of a real sample file, with the voxel size read from the file."""
     h5py = pytest.importorskip("h5py")
-    path = SAMPLES / f"{name}.h5"
-    if not path.exists():
-        pytest.skip(f"sample {path.name} not found in the samples directory")
+    path = SM.samples_dir() / f"{name}.h5"                      # $NCNTM_SAMPLES, else <repository>/samples
+    assert path.is_file(), (f"the core sample {path} is missing: write the samples with scripts/make_samples.py, "
+                            "or set the environment variable NCNTM_SAMPLES")
     with h5py.File(path, "r") as fh:
         raw = fh["raw"][10:22, 30:50, 40:68]
         lab = fh["instance"][10:22, 30:50, 40:68]
@@ -1520,13 +1519,20 @@ def test_wiremesh_skeleton_and_gaussians_move_into_the_display_space():
         s = E.Scene()
         assert s.add_wiremesh(mesh, grid, space) == 4
         assert np.allclose(s.bounds()[0], 0.0) and np.allclose(s.bounds()[1], (0.120, 0.120, top))
-        squash = np.array([1.0, 1.0, top / 0.300])              # the tubes are squashed along z like everything else
+        squash = np.array([1.0, 1.0, top / 0.300])              # exact=True: the tubes are squashed along z like everything else
         s = E.Scene()
-        s.add_skeleton(skel, grid, space, radius=0.002)
+        s.add_skeleton(skel, grid, space, radius=0.002, exact=True)
         assert np.allclose(s.bounds()[0], -0.002 * squash) and np.allclose(s.bounds()[1], np.array([0.120, 0.120, top]) + 0.002 * squash)
         s = E.Scene()
-        s.add_skeleton(skel, grid, space)                       # radii from the skeleton: 10 nm at the root
+        s.add_skeleton(skel, grid, space, exact=True)           # radii from the skeleton: 10 nm at the root
         assert np.allclose(s.bounds()[0], -0.010 * squash)
+        # the default draws what the USD stage draws: round tubes of the same volume.  The edges along x and y get
+        # sqrt(squash) times the radius, the edge along z keeps it; the joints are the squashed spheres
+        s = E.Scene()
+        s.add_skeleton(skel, grid, space, radius=0.002)
+        in_plane = 0.002 * math.sqrt(top / 0.300)               # radius of the tubes along x and y
+        assert np.allclose(s.bounds()[0], (-0.002, -0.002, -in_plane))
+        assert np.allclose(s.bounds()[1], (0.120 + 0.002, 0.120 + 0.002, top + 0.002 * top / 0.300))
         s = E.Scene()
         assert s.add_gaussian_mixture(gm, grid, space) == 1
         mu, w = s._g[0][0], s._g[0][1]
@@ -1872,14 +1878,16 @@ def test_review_five_representations_register_on_one_voxel(space, axis):
 
     other_nm = (np.array([1, 5, 1]) + 0.5) * P_D                # centre of voxel [k=1, j=5, i=1]
     skeleton = Skeleton(np.stack([centre_nm, other_nm]), np.array([(0, 1)], np.int32), np.array([4.0, 4.0]))
-    s = E.Scene()
-    s.add_skeleton(skeleton, P_GRID, space, min_pixels=0.0, color=(1, 1, 1), lit=False)      # 4. a capsule of 4 nm radius between two centres
     ends = np.stack([centre_nm, other_nm]) / P_D * d / 1000.0   # nm -> index -> scene units as drawn
     radius = 0.004 * d / P_D                                    # the radius is squashed with the voxel, per axis
-    assert np.allclose(s.bounds()[0], ends.min(0) - radius, atol=1e-9) and np.allclose(s.bounds()[1], ends.max(0) + radius, atol=1e-9)
-    cam.ssaa = 4                                                # coverage of the thin capsule: 16 rays per pixel
     middle_px = 0.5 * (centre_px + (np.array([1, 5, 1])[[u, v]] + 0.5) * d[[u, v]] / 2)
-    assert np.abs(centroid_px(render(s, cam).rgba_float[..., 0].astype(np.float64)) - middle_px).max() < 0.3
+    cam.ssaa = 4                                                # coverage of the thin capsule: 16 rays per pixel
+    for exact in (True, False):                                 # 4. a capsule of 4 nm radius between two centres
+        s = E.Scene()
+        s.add_skeleton(skeleton, P_GRID, space, min_pixels=0.0, color=(1, 1, 1), lit=False, exact=exact)
+        if exact:           # the exact image; the default (a round tube of the same volume) has the same axis
+            assert np.allclose(s.bounds()[0], ends.min(0) - radius, atol=1e-9) and np.allclose(s.bounds()[1], ends.max(0) + radius, atol=1e-9)
+        assert np.abs(centroid_px(render(s, cam).rgba_float[..., 0].astype(np.float64)) - middle_px).max() < 0.3
     cam.ssaa = 1
 
     gaussian = Gaussians(centre_nm[None], (np.diag([1.5, 2.0, 2.5]) ** 2)[None], np.array([1.0]))
@@ -2089,11 +2097,12 @@ def test_review_instance_ids_of_every_integer_type_get_the_same_colours():
 def test_review_skeleton_tubes_are_squashed_with_the_voxels(space):
     """6 x 6 x 30 nm voxels, a skeleton edge along x with radii of 15 nm, at 0.5 nm per pixel.
     Physical space: a round tube, 30 nm = 60 pixels across seen along y and along z.
-    Index space (z drawn 5 times too short): still 30 nm wide in y, but 6 nm = 12 pixels high in
-    z -- the exact image of the round tube, so the skeleton stays inside its squashed instance."""
+    Index space (z drawn 5 times too short) with exact=True: still 30 nm wide in y, but 6 nm =
+    12 pixels high in z -- the exact image of the round tube, so the skeleton stays inside its
+    squashed instance."""
     skeleton = Skeleton(np.array([(30.0, 60.0, 180.0), (130.0, 60.0, 180.0)]), np.array([(0, 1)], np.int32), np.array([15.0, 15.0]))
     s = E.Scene()
-    assert s.add_skeleton(skeleton, GRID, space, min_pixels=0.0, object_id=4) > 0
+    assert s.add_skeleton(skeleton, GRID, space, min_pixels=0.0, object_id=4, exact=True) > 0
     squash = 1.0 if space == "physical" else 0.2
     lo, hi = s.bounds()
     assert np.allclose(lo * 1000, (15.0, 45.0, (180.0 - 15.0) * squash)) and np.allclose(hi * 1000, (145.0, 75.0, (180.0 + 15.0) * squash))
@@ -2104,11 +2113,56 @@ def test_review_skeleton_tubes_are_squashed_with_the_voxels(space):
         rows = np.flatnonzero(hit[:, int(cam.project((0.080, 0.060, 0.180 * squash))[0, 0])])     # the column at x = 80 nm
         assert 0.94 * across_nm / 0.5 - 1 <= len(rows) <= across_nm / 0.5     # a 10-sided tube is a little narrower than its circle
         assert abs(rows.mean() + 0.5 - centre_nm / 0.5) < 0.6
-    hair = E.Scene()                                            # the minimum on-screen width still holds for squashed tubes
-    hair.add_skeleton(skeleton, GRID, space, radius=1e-6, min_pixels=4.0, object_id=4)
-    cam = E.Camera.for_slice(GRID, "y", space)                  # 6 nm per pixel
-    rows = np.flatnonzero(render(hair, cam).object_id[:, 13] == 4)             # the column at x = 81 nm
-    assert len(rows) == 4 and abs(rows.mean() + 0.5 - 180.0 * squash / 6.0) < 0.01
+    for exact in (True, False):                                 # the minimum on-screen width holds for both kinds of tube
+        hair = E.Scene()
+        hair.add_skeleton(skeleton, GRID, space, radius=1e-6, min_pixels=4.0, object_id=4, exact=exact)
+        cam = E.Camera.for_slice(GRID, "y", space)              # 6 nm per pixel
+        rows = np.flatnonzero(render(hair, cam).object_id[:, 13] == 4)         # the column at x = 81 nm
+        assert len(rows) == 4 and abs(rows.mean() + 0.5 - 180.0 * squash / 6.0) < 0.01
+
+
+def test_skeleton_in_index_space_is_drawn_as_the_stage_draws_it():
+    """The default of add_skeleton in index space: ROUND tubes with the width rule of the USD
+    stage (grid.tube_width_factor) and squashed node spheres.  6 x 6 x 30 nm voxels, radii of
+    15 nm, at 0.5 nm per pixel: an edge along x is a round tube of 15 * sqrt(1/5) = 6.7 nm radius
+    (13.4 nm across seen along y AND along z), an edge along z keeps its 15 nm."""
+    def across(skeleton, axis, at, column):
+        """(pixels across, centre in pixels) of the tube in the picture column (or row) through ``at``."""
+        s = E.Scene()
+        s.add_skeleton(skeleton, GRID, "index", min_pixels=0.0, object_id=4)
+        cam = E.Camera.for_slice(GRID, axis, "index", pixels_per_voxel=12)     # 0.5 nm per pixel
+        hit = render(s, cam).object_id == 4
+        x, y = cam.project(at)[0]
+        line = np.flatnonzero(hit[:, int(x)] if column else hit[int(y), :])
+        return len(line), line.mean() + 0.5
+
+    along_x = Skeleton(np.array([(30.0, 60.0, 180.0), (130.0, 60.0, 180.0)]), np.array([(0, 1)], np.int32), np.array([15.0, 15.0]))
+    round_nm = 2 * 15.0 * math.sqrt(1 / 5)                      # 13.4 nm
+    assert abs(float(GRID.tube_width_factor(along_x.vertices_xyz_nm[:1], along_x.vertices_xyz_nm[1:], "index")[0]) - math.sqrt(1 / 5)) < 1e-12
+    middle = (0.080, 0.060, 0.180 / 5)                          # x = 80 nm on the axis, as drawn (z / 5)
+    for axis, centre_nm in (("y", 180.0 / 5), ("z", 60.0)):     # seen along y: rows are z; seen along z: rows are y
+        n, centre = across(along_x, axis, middle, column=True)
+        assert 0.94 * round_nm / 0.5 - 1 <= n <= round_nm / 0.5, (axis, n)     # the same width from both sides: round
+        assert abs(centre - centre_nm / 0.5) < 0.6
+    s = E.Scene()
+    s.add_skeleton(along_x, GRID, "index", min_pixels=0.0)
+    lo, hi = s.bounds()             # the joints are the node spheres squashed by A: 15 nm in x and y, 3 nm in z
+    assert np.allclose(lo * 1000, (15.0, 45.0, 36.0 - round_nm / 2)) and np.allclose(hi * 1000, (145.0, 75.0, 36.0 + round_nm / 2))
+
+    along_z = Skeleton(np.array([(60.0, 60.0, 60.0), (60.0, 60.0, 300.0)]), np.array([(0, 1)], np.int32), np.array([15.0, 15.0]))
+    n, centre = across(along_z, "y", (0.060, 0.060, 0.180 / 5), column=False)             # the picture row at z = 180 nm
+    assert 0.94 * 30.0 / 0.5 - 1 <= n <= 30.0 / 0.5 and abs(centre - 60.0 / 0.5) < 0.6      # across the sections: unchanged
+
+    # in physical space the two kinds are the same picture
+    one, two = E.Scene(), E.Scene()
+    one.add_skeleton(along_x, GRID, "physical", min_pixels=0.0)
+    two.add_skeleton(along_x, GRID, "physical", min_pixels=0.0, exact=True)
+    cam = E.Camera.for_slice(GRID, "y", "physical", pixels_per_voxel=2)
+    assert np.array_equal(render(one, cam).rgba, render(two, cam).rgba)
+    with pytest.raises(ValueError, match="edge indices"):
+        E.Scene().add_skeleton(Skeleton(np.zeros((2, 3)), np.array([(0, 2)], np.int32), np.ones(2)), GRID, "index")
+    with pytest.raises(ValueError, match="one per node"):
+        E.Scene().add_skeleton(along_x, GRID, "index", radius=[0.01, 0.01, 0.01])
 
 
 def test_review_stretched_spheres_are_the_ellipsoids_of_add_ellipsoids():

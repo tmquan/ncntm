@@ -359,27 +359,6 @@ def author_camera(stage: Usd.Stage, name: str = "overview", *, eye, target, up=(
 
 
 # ---- geometry that does not need a stage ---------------------------------------------------
-def tube_width_factor(grid: VoxelGrid, space: str, p0_xyz_nm, p1_xyz_nm) -> np.ndarray:
-    """Factor (E,) for the width of round tubes along the edges p0 -> p1 (true nm) when they
-    are drawn in ``space``.  1 in physical space.
-
-    A tube radius is a physical length and has no meaning in index space.  The picture there
-    is the image of the true scene under A = diag(grid.space_scale(space)), and A turns a
-    round tube into a tube with an elliptical cross-section.  A drawn tube can only be round,
-    so it gets the radius that keeps the VOLUME of that image: A multiplies volumes by
-    det(A) and the length of an edge with unit tangent t by |A t|, so the area of the
-    cross-section (perpendicular to the new axis) changes by det(A) / |A t|, and the width
-    by the square root of that.
-    For SNEMI3D (z shrinks 5 times): a tube along z keeps its width, a tube along x or y
-    becomes sqrt(1/5) = 0.447 times as wide, a tube at 45 degrees between x and z 0.527 times."""
-    a = grid.space_scale(space)
-    t = np.asarray(p1_xyz_nm, dtype=np.float64) - np.asarray(p0_xyz_nm, dtype=np.float64)
-    length = np.linalg.norm(t, axis=-1)
-    image_length = np.linalg.norm(t * a, axis=-1)                 # the edge as drawn in `space`
-    stretch = np.divide(image_length, length, out=np.ones_like(length), where=length > 0)      # |A t|
-    return np.where(length > 0, np.sqrt(np.prod(a) / stretch), np.prod(a) ** (1.0 / 3.0))      # zero-length edge
-
-
 def nice_length_nm(extent_nm: float, fraction: float = 0.25) -> float:
     """Largest length of the form 1, 2 or 5 times a power of ten that is not longer than
     ``fraction`` of ``extent_nm``: a round number for a scale bar."""
@@ -390,8 +369,9 @@ def nice_length_nm(extent_nm: float, fraction: float = 0.25) -> float:
     return float(max(m * power for m in (1.0, 2.0, 5.0) if m * power <= target * (1 + 1e-12)))
 
 
-def format_length(nm: float) -> str:
-    """A length in nm as a label: "500 nm" below one micrometre, "2 um" from there on."""
+def format_length_nm(nm: float) -> str:
+    """A length in NANOMETRES as a label: "500 nm" below one micrometre, "2 um" from there on.
+    (``figure.format_length`` does the same for a length in micrometres, the unit of pictures.)"""
     return f"{nm / 1000.0:g} um" if nm >= 1000.0 else f"{nm:g} nm"
 
 
@@ -890,7 +870,7 @@ class Dataset:
         """Linear BasisCurves in the PHYSICAL frame: one 2-point curve per edge, widths per point.
 
         physical space   points = the vertices in nm, width = 2 radius
-        index space      points = A p, width = 2 radius * ``tube_width_factor`` of the edge
+        index space      points = A p, width = 2 radius * ``grid.tube_width_factor`` of the edge
         Widths are diameters in nm of the local frame; no normals, so renderers draw tubes."""
         order = edges.reshape(-1)                                        # point k of the prim = vertex order[k]
         radii = np.broadcast_to(np.asarray(radii_nm, dtype=np.float64), (len(vertices_nm),))
@@ -899,7 +879,7 @@ class Dataset:
             return self.grid.to_space(vertices_nm, space)[order]
 
         def widths(space):
-            factor = tube_width_factor(self.grid, space, vertices_nm[edges[:, 0]], vertices_nm[edges[:, 1]])
+            factor = self.grid.tube_width_factor(vertices_nm[edges[:, 0]], vertices_nm[edges[:, 1]], space)
             return 2.0 * radii[order] * np.repeat(factor, 2)
 
         curves = UsdGeom.BasisCurves.Define(self.stage, self._new_prim_path(layer, self.physical, name))
@@ -938,13 +918,16 @@ class Dataset:
         """skeleton: tubes and node markers in the PHYSICAL frame.  Returns (tubes, nodes).
 
         tubes   linear BasisCurves, one 2-point curve per edge; the width at a node is
-                2 x its radius (``skeleton.radii_nm``, the distance to the nearest boundary)
+                2 x its radius (``skeleton.radii_nm``: the distance to the centre of the nearest
+                voxel outside the instance, about half a voxel more than to the surface)
         nodes   a PointInstancer of unit spheres, one per node, scaled to the node radius;
                 branch points (more than two edges) and end points (one edge) are
                 ``marker_scale`` times larger and have their own colours
 
         In index space the node positions become A p, the node spheres become the ellipsoids
-        A maps them to (scale = radius * A), and the tube widths follow ``tube_width_factor``."""
+        A maps them to (scale = radius * A), and the tube widths follow ``grid.tube_width_factor``
+        (round tubes of the same volume as the exact image; ``emray.Scene.add_skeleton`` draws
+        the same)."""
         vertices = _checked("skeleton.vertices_xyz_nm", skeleton.vertices_xyz_nm, (3,))
         edges = _checked("skeleton.edges", skeleton.edges, (2,), kind="i")
         radii = np.asarray(skeleton.radii_nm, dtype=np.float64)
@@ -1159,7 +1142,7 @@ class Dataset:
         prim = mesh.GetPrim()
         prim.CreateAttribute("em:lengthNm", _T.Double).Set(float(length_nm))
         prim.CreateAttribute("em:axis", _T.Token).Set("xyz"[axis])
-        prim.CreateAttribute("em:label", _T.String).Set(format_length(length_nm))
+        prim.CreateAttribute("em:label", _T.String).Set(format_length_nm(length_nm))
         return mesh
 
     def add_frame(self, bar_nm: float = None, color=(0.35, 0.35, 0.35)) -> dict:

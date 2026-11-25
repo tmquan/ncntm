@@ -195,12 +195,11 @@ class _Builder:
     object ids, and one method per prim type."""
 
     def __init__(self, volumes, tube_sides, sphere_subdiv):
-        self.scene = emray.Scene()
-        self.scene.objects = {}                   # object id -> {"path", "layer", "type"}
+        self.scene = emray.Scene()                # scene.objects: object id -> {"path", "layer", "type"}
         self.cache = UsdGeom.XformCache(Usd.TimeCode.Default())
         self.volumes, self.tube_sides, self.sphere_subdiv = volumes, tube_sides, sphere_subdiv
         self.samplers = {}                        # (array, matrix, colour map, window) -> emray sampler id
-        self.skipped = {}                         # reason -> [prim paths]
+        self.skipped = self.scene.skipped         # reason -> [prim paths]
 
     def object_id(self, prim: Usd.Prim, layer: str) -> int:
         """A new id for the object-id buffer; ids start at 1 (-1 means "nothing")."""
@@ -418,7 +417,7 @@ def build_scene(stage: Usd.Stage, layers=None, device=None, volumes=None, *, tub
     volumes   arrays for the slices of datasets that have no HDF5 file, see ``load_volume``
     tube_sides, sphere_subdiv   tessellation of tubes and spheres
 
-    The scene gets two extra attributes: ``scene.objects``, {object id: {"path", "layer",
+    Two dictionaries of the scene are filled: ``scene.objects``, {object id: {"path", "layer",
     "type"}}, to read the object-id buffer of a rendered image (one id per prim, from 1), and
     ``scene.skipped``, {reason: [prim paths]}, the content of the warning.  Which variant of
     "space" is drawn is whatever is selected on the stage: switch it with
@@ -460,7 +459,6 @@ def build_scene(stage: Usd.Stage, layers=None, device=None, volumes=None, *, tub
         lines = [f"  {reason}: {', '.join(paths[:5])}{' ...' if len(paths) > 5 else ''} ({len(paths)})"
                  for reason, paths in builder.skipped.items()]
         warnings.warn("build_scene left these prims out or approximated them:\n" + "\n".join(lines), stacklevel=2)
-    builder.scene.skipped = builder.skipped
     return builder.scene.build(device)
 
 

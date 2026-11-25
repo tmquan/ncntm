@@ -3,6 +3,7 @@
 
     python scripts/install_kernel.py --accept-eula            # after reading the licence
     python scripts/install_kernel.py --dry-run                # show what would be written
+    python scripts/install_kernel.py --gpu 0                  # a machine with several GPUs: notebooks use this one
     python scripts/install_kernel.py --uninstall
 
 The kernel is the Python of Isaac Sim, so that a notebook can start Isaac Sim inside its own
@@ -31,6 +32,8 @@ Environment written into the kernel spec
     LD_PRELOAD                     only with --preload, or on aarch64 if libgomp exists (Isaac Sim
                                    refuses to import without it there)
     OMNI_KIT_ACCEPT_EULA=YES       only with --accept-eula
+    NCNTM_KIT_GPU=N                only with --gpu N: ncntm.viz.kit.start_kit() then restricts Isaac Sim and
+                                   CUDA to GPU N (nvidia-smi index) unless the notebook passes gpu= itself
 Two properties of kernel.json decide how these are written: a value REPLACES the variable the
 Jupyter server would pass on (it is not appended), and "${VAR}" is left as literal text when
 VAR is unset.  So every value is written out in full and no "${...}" is used.
@@ -49,6 +52,7 @@ import sys
 
 DEFAULT_NAME = "ncntm-isaacsim"
 EULA_VARIABLE = "OMNI_KIT_ACCEPT_EULA"
+GPU_VARIABLE = "NCNTM_KIT_GPU"                  # read by ncntm.viz.kit.start_kit as the default of gpu=
 EULA_URL = "https://docs.omniverse.nvidia.com/platform/latest/common/NVIDIA_Omniverse_License_Agreement.html"
 SYSTEM_EGL_VENDOR_DIRS = ("/etc/glvnd/egl_vendor.d", "/usr/share/glvnd/egl_vendor.d")     # libglvnd's own search order
 MARKER = "NCNTM_KERNEL_PROBE "
@@ -86,7 +90,16 @@ for folder in folders:                                      # pip: in the packag
     if version:
         break
 out["isaacsim_version"] = version
-torch = spec_folder("torch")
+def package_path(name):
+    # what <name>.__path__[0] will be once imported: NOT resolved.  Isaac Sim compares LD_PRELOAD with
+    # glob(torch.__path__[0] + ".libs/libgomp*") as text, so a resolved path would not match behind a link.
+    try:
+        spec = importlib.util.find_spec(name)
+    except Exception:
+        spec = None
+    locations = list(spec.submodule_search_locations or []) if spec is not None else []
+    return locations[0] if locations else ""
+torch = package_path("torch")
 out["torch_gomp"] = sorted(glob.glob(os.path.join(torch + ".libs", "libgomp*"))) if torch else []
 print("NCNTM_KERNEL_PROBE " + json.dumps(out))
 """
@@ -100,6 +113,14 @@ def say(*parts):
 def is_arm() -> bool:
     machine = platform.machine().lower()
     return sys.platform == "linux" and ("arm" in machine or "aarch" in machine)
+
+
+def gpu_count() -> int:
+    """Number of GPUs the NVIDIA driver knows, without touching CUDA; 0 if unknown."""
+    try:
+        return len(os.listdir("/proc/driver/nvidia/gpus"))
+    except OSError:
+        return 0
 
 
 def user_data_dir() -> str:
@@ -315,6 +336,16 @@ def kernel_environment(args, probe: dict, kind: str = "interpreter"):
     if preload:
         env["LD_PRELOAD"] = os.pathsep.join(preload)
 
+    gpu = getattr(args, "gpu", None)
+    if gpu is not None:
+        env[GPU_VARIABLE] = str(int(gpu))
+        notes.append(f"{GPU_VARIABLE}={int(gpu)}: from --gpu; notebooks that call start_kit() without gpu= use GPU {int(gpu)} only")
+    else:
+        count = gpu_count()
+        if count > 1:
+            notes.append(f"note: this machine has {count} GPUs and the kernel may use all of them; --gpu N writes "
+                         f"{GPU_VARIABLE}=N, which makes notebooks keep Isaac Sim and CUDA on GPU N")
+
     if args.accept_eula:
         env[EULA_VARIABLE] = "YES"
         notes.append(f"{EULA_VARIABLE}=YES: you passed --accept-eula")
@@ -363,6 +394,9 @@ def main(argv=None) -> int:
     parser.add_argument("--lib-path", metavar="DIR", action="append", help="folder for the kernel's LD_LIBRARY_PATH (repeatable)")
     parser.add_argument("--egl-vendor-dirs", metavar="DIRS", help="value for the kernel's __EGL_VENDOR_LIBRARY_DIRS")
     parser.add_argument("--preload", metavar="LIB", action="append", help="library for the kernel's LD_PRELOAD (repeatable)")
+    parser.add_argument("--gpu", metavar="N", type=int,
+                        help=f"write {GPU_VARIABLE}=N into the kernel spec: notebooks keep Isaac Sim and CUDA on GPU N "
+                             "(nvidia-smi index) unless they pass gpu= themselves")
     parser.add_argument("--accept-eula", action="store_true",
                         help=f"write {EULA_VARIABLE}=YES into the kernel spec: you accept the NVIDIA Omniverse licence")
     parser.add_argument("--dry-run", action="store_true", help="print what would be written; write nothing")
@@ -371,6 +405,8 @@ def main(argv=None) -> int:
 
     if not re.fullmatch(r"[A-Za-z0-9._\-]+", args.name):
         parser.error(f"--name {args.name!r}: only letters, digits, '.', '_' and '-' are allowed in a kernel name")
+    if args.gpu is not None and args.gpu < 0:
+        parser.error(f"--gpu {args.gpu}: a GPU index is 0 or more")
 
     if args.uninstall:
         probe = run_probe(os.path.abspath(os.path.expanduser(args.python))) if args.sys_prefix and args.python else {}

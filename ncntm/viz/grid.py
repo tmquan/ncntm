@@ -138,6 +138,30 @@ class VoxelGrid:
         a = self.space_scale(space)
         return np.asarray(cov_nm2, dtype=np.float64) * a[:, None] * a[None, :]
 
+    def tube_width_factor(self, p0_xyz_nm, p1_xyz_nm, space: str = "physical") -> np.ndarray:
+        """Factor (E,) for the width of ROUND tubes along the edges p0 -> p1 (true physical nm,
+        (E, 3) each) when they are drawn in ``space``.  Exactly 1 in physical space.
+
+        A tube radius is a physical length and has no meaning in index space.  The picture
+        there is the image of the true scene under A = diag(space_scale(space)), and A turns a
+        round tube into one with an elliptical cross-section.  A renderer's tube (a USD curve)
+        can only be round, so it gets the radius that keeps the VOLUME of that image: A
+        multiplies volumes by det(A) and the length of an edge with unit tangent t by |A t|,
+        so the area of the cross-section changes by det(A) / |A t| and the width by the square
+        root of that.  The one rule for every module that draws round tubes (skeleton, wiremesh).
+
+        SNEMI3D (z drawn 5 times too short): a tube along z keeps its width, a tube along x or
+        y becomes sqrt(1/5) = 0.447 times as wide, one at 45 degrees between x and z 0.527 times.
+        The round tube is wider along z than the exact image (0.447 r instead of r / 5 for a
+        tube along x), so in index space it can stand out of the squashed instance."""
+        a = self.space_scale(space)
+        t = np.asarray(p1_xyz_nm, dtype=np.float64) - np.asarray(p0_xyz_nm, dtype=np.float64)
+        length = np.linalg.norm(t, axis=-1)
+        image_length = np.linalg.norm(t * a, axis=-1)                 # the edge as drawn in `space`
+        stretch = np.divide(image_length, length, out=np.ones_like(length), where=length > 0)      # |A t|
+        # an edge of length zero has no direction: the factor that keeps the volume of a sphere
+        return np.where(length > 0, np.sqrt(np.prod(a) / stretch), np.prod(a) ** (1.0 / 3.0))
+
     # ---- matrices ------------------------------------------------------------------
     def index_to_unit_matrix(self, space: str = "physical") -> np.ndarray:
         """4x4 matrix taking continuous index coordinates (i, j, k, 1) to scene units

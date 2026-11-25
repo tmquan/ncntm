@@ -1,0 +1,9 @@
+Dataset,Modality,Region,Name,Num crops,Subvolume size (k actual crop sizes x y z),Size crop,Voxel size (x x y x z nm),Voxel count,Task,Split
+SNEMI3D,ssSEM,Mouse S1 cortex,AC3_em,1,01 x 1024 x 1024 x 100,1024 x 1024 x 100,6 x 6 x 30,104857600,SFT,Test
+SNEMI3D,ssSEM,Mouse S1 cortex,AC3_cc,1,01 x 1024 x 1024 x 100,1024 x 1024 x 100,6 x 6 x 30,104857600,SFT,Test
+SNEMI3D,ssSEM,Mouse S1 cortex,AC4_em,1,01 x 1024 x 1024 x 100,1024 x 1024 x 100,6 x 6 x 30,104857600,SSL,Test
+SNEMI3D,ssSEM,Mouse S1 cortex,AC4_cc,1,01 x 1024 x 1024 x 100,1024 x 1024 x 100,6 x 6 x 30,104857600,SSL,Test
+SNEMI3D,ssSEM,Mouse S1 cortex,SNEMI3D train,1,01 x 1024 x 1024 x 100,1024 x 1024 x 100,6 x 6 x 30,104857600,SFT,Train
+SNEMI3D,ssSEM,Mouse S1 cortex,SNEMI3D test,1,01 x 1024 x 1024 x 100,1024 x 1024 x 100,6 x 6 x 30,104857600,SSL,Test
+Neurons,ssSEM,Mouse S1 cortex,Kasthuri cylinder (cc),1,01 x 5000 x 2900 x 300,5000 x 2900 x 300,6 x 6 x 30,4350000000,SFT,Train
+Neurons,ssSEM,Mouse S1 cortex,Kasthuri cropping (cc),1,01 x 5904 x 4816 x 1848,5904 x 4816 x 1848,6 x 6 x 30,52545411072,SSL,Train

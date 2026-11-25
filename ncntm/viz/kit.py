@@ -10,10 +10,12 @@ Nothing else in the package imports ``isaacsim`` or ``omni``.  A notebook starts
 and from there on uses plain ``pxr`` on ``session.stage``.  The same lines run on a machine
 without Isaac Sim (tier "off": ``session.app`` is None and the stages are plain pxr stages).
 
-ORDER MATTERS: these lines run before anything imports ``pxr``.  ``ncntm.viz.stage`` and
-``ncntm.viz.usd_to_emray`` import pxr, so they are imported AFTER ``kit.start_kit()``, on a later
-line or in a later cell (``from ncntm.viz import kit, stage`` on one line is the mistake to
-avoid).  If the order is wrong, start_kit says so and names the module that came too early.
+ORDER MATTERS: these lines run before anything imports ``pxr`` or ``warp``.
+``ncntm.viz.stage`` and ``ncntm.viz.usd_to_emray`` import pxr, ``ncntm.viz.emray`` imports warp,
+so they are imported AFTER ``kit.start_kit()``, on a later line or in a later cell
+(``from ncntm.viz import kit, stage`` on one line is the mistake to avoid).  If the order is
+wrong, start_kit says so and names the module that came too early.  (pxr first breaks every
+Kit tier; warp first breaks the tiers that bring their own Warp, "core" and "full".)
 
 Tiers
     "off"    no Kit.  Plain OpenUSD from the interpreter.  Always possible.
@@ -32,6 +34,11 @@ What start_kit takes care of (each line is a failure that was measured with Isaa
 inside a Jupyter kernel; do not remove one without measuring again)
     * ``pxr`` imported before Kit: Kit ships its own OpenUSD (25.11) and breaks when another
       build (26.08 in the same interpreter) is already loaded.  start_kit refuses to start.
+    * ``warp`` imported before Kit: tiers "core" and "full" load the Warp that Isaac Sim ships
+      (1.17.0, extension omni.warp.core).  With the interpreter's Warp (1.19.0) already
+      imported the two are mixed and the first Warp array fails with an ImportError.
+      start_kit refuses to start those tiers; tier "usd" has no Warp of its own and only
+      warns that the order would not work elsewhere.
     * the licence: ``import isaacsim`` asks for it on stdin, which ends a kernel.  start_kit
       checks first and raises a readable error.  It never accepts the licence for you.
     * nest_asyncio: applied by ``import isaacsim`` when it sees Jupyter; mandatory.  start_kit
@@ -39,7 +46,15 @@ inside a Jupyter kernel; do not remove one without measuring again)
     * sys.argv: SimulationApp forwards it to Kit.  The kernel's "-f <connection file>" is
       removed and "--portable-root DIR" is added; without it Kit writes logs, cache and data
       INTO the Isaac Sim installation.  DIR is ``root``, else NCNTM_KIT_ROOT, else
-      ~/.cache/ncntm/kit.  TMPDIR for Kit's native code points to DIR/tmp.
+      ~/.cache/ncntm/kit.
+    * TMPDIR: while Kit starts it points to DIR/tmp, which is where Kit's native code then
+      keeps its temporary files (otherwise /tmp/carb.* and /var/tmp/st_python*).  Afterwards
+      the variable is put back: left in place it broke Warp, whose kernel compiler (NVRTC of
+      CUDA 12.9, the one of Kit's Warp 1.17) refuses a TMPDIR longer than about 120
+      characters ("name of directory for temporary files is too long").
+    * the experience files: apps/*.kit are ignored by the repository (.gitignore has *.kit),
+      so a clone does not have them.  Their text is kept in this module as well; a missing
+      file is written to DIR/apps and used from there.
     * print(): Kit replaces sys.stdout unless --/app/python/interceptSysStdOutput=false.
     * crash reporter and telemetry: stock Kit uploads crash dumps and usage events.  Every
       start passes PRIVACY_ARGS, excludes the telemetry extension and does not load the crash
@@ -64,6 +79,10 @@ inside a Jupyter kernel; do not remove one without measuring again)
 
 Not done here on purpose: nothing is saved at kernel exit (call ``session.save``), and atexit
 handlers registered before start_kit do not run (the exit hook leaves the process first).
+Nothing prunes the Kit folder either: every start leaves one log in DIR/logs (about 0.2 MB in
+tier "usd", 0.3 MB in "core", a few MB in "full") and an empty carb.* folder in DIR/tmp;
+delete DIR whenever no kernel is running.  Two kernels may share DIR; if they start within the
+same second they also share the log file, and ``session.kit_errors()`` then counts both.
 Tier "off" changes nothing about how the process ends; inside a kernel it only sets the soft
 core-file limit to 0 (see start_kit).
 
@@ -96,6 +115,7 @@ from dataclasses import dataclass, field
 TIERS = ("off", "usd", "core", "full")
 APPS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "apps")
 EXPERIENCES = {"usd": "ncntm.kit_usd.kit", "core": "ncntm.kit_core.kit", "full": ""}   # "" = stock isaacsim.exp.base.python.kit
+KIT_WARP_TIERS = ("core", "full")               # tiers in which Kit loads its own Warp (extension omni.warp.core)
 ENV_TIER, ENV_ROOT, ENV_GPU = "NCNTM_KIT", "NCNTM_KIT_ROOT", "NCNTM_KIT_GPU"
 ENV_PROTECT = "NCNTM_KIT_PROTECT_QUEUE"         # "0": do not touch asyncio (see protect_queued_cells)
 EGL_VENDOR_VARIABLE = "__EGL_VENDOR_LIBRARY_DIRS"       # libglvnd: where EGL looks for drivers; conda sets it to its own folder
@@ -118,6 +138,113 @@ QUIET_ARGS = ("--/log/outputStreamLevel=Error", "--/app/enableStdoutOutput=false
 
 def excluded_extensions_arg(names=PRIVACY_EXCLUDED_EXTENSIONS) -> str:
     return "--/app/extensions/excluded=[" + ",".join(f'"{n}"' for n in names) + "]"
+
+
+# The experience files apps/*.kit, as text.  The files are what Kit is started with when they are there; this copy
+# is what start_kit writes to <root>/apps when they are not (the repository ignores *.kit, so a clone has none).
+# tests/test_kit.py compares the two: change them together.
+EXPERIENCE_TEXT = {
+    "usd": r'''# ncntm tier "usd": Isaac Sim's Kit runtime with omni.usd and nothing that needs a graphics device.
+#
+# What you get: the UsdContext (new / open / save stage, stage events, omni.kit.commands with undo,
+# timeline), Kit's OpenUSD 25.11 and the ParticleField (3D Gaussian splat) schema for it.
+# What you do not get: omni.gpu_foundation, RTX, viewport, Replicator, omni.ui, PhysX, Fabric.
+# Measured on the development host (Isaac Sim 6.2.0 pip install): 24 extensions, 0.3 - 0.5 s, 0 errors.
+#
+# This file contains NO path.  Extension folders are given on the command line by
+# ncntm.viz.kit.start_kit():  SimulationApp passes  --ext-folder $ISAAC_PATH/exts  and
+# --ext-folder $ISAAC_PATH/apps  itself, and start_kit adds  --ext-folder $ISAAC_PATH/extscache
+# (see kit.isaac_extension_folders).  ISAAC_PATH is set by "import isaacsim" (pip install) or
+# by python.sh (binary and source builds).
+# The same text is kept in ncntm/viz/kit.py (EXPERIENCE_TEXT): start_kit writes this file from it where the
+# file is missing (the repository ignores *.kit).  Change both together; tests/test_kit.py compares them.
+[package]
+title = "ncntm Kit USD (no renderer)"
+description = "Kit + omni.usd: stage authoring and inspection without gpu_foundation, RTX, viewport or UI"
+version = "0.2.0"
+keywords = ["app", "usd"]
+
+[dependencies]
+"isaacsim.simulation_app" = {}              # the SimulationApp helper (depends on omni.usd)
+"omni.usd" = {}                             # UsdContext, stage events, omni.kit.commands, undo, timeline
+"omni.kit.usd.layers" = {}                  # imported by isaacsim.simulation_app.utils
+"omni.kit.loop-isaac" = {}                  # Isaac loop runner (the notebook steps Kit by hand)
+"omni.kit.primitive.mesh" = {}              # CreateMeshPrim command
+"omni.usd.schema.usd_particle_field" = {}   # ParticleField3DGaussianSplat schema for Kit's OpenUSD 25.11
+
+[settings.app]
+name = "ncntm-kit-usd"
+version = "0.2.0"
+content.emptyStageOnStart = false
+fastShutdown = true
+file.ignoreUnsavedStage = true
+hangDetector.enabled = false
+settings.persistent = false
+enableDeveloperWarnings = false
+runLoops.main.rateLimitEnabled = false
+useFabricSceneDelegate = false          # no usdrt in this tier
+extensions.registryEnabled = false      # never try to download extensions
+
+[settings.exts."omni.usd"]
+locking.onClose = false
+
+[settings.persistent]
+app.stage.upAxis = "Z"
+simulation.defaultMetersPerUnit = 1.0
+''',
+    "core": r'''# ncntm tier "core" (optional): tier "usd" plus Fabric / USDRT and the isaacsim.core.experimental
+# stage, prim and xform wrappers, which bring PhysX and Kit's bundled Warp with them.
+#
+# The GPU foundation is loaded but never asked for a rendering device: no RTX, no viewport, no UI.
+# Measured on the development host (Isaac Sim 6.2.0 pip install): 69 extensions, 3.1 s, 0 errors.
+# Differences to tier "usd" that a notebook can see: "import warp" gives Kit's Warp (1.17.0)
+# instead of the pip one, and playing the timeline adds a /PhysicsScene prim to the stage.
+# ncntm.viz itself needs nothing from this tier; it is here for people who want the Isaac Sim
+# core API next to the same stage.
+#
+# This file contains NO path; see ncntm.kit_usd.kit for how extension folders are passed.
+# The same text is kept in ncntm/viz/kit.py (EXPERIENCE_TEXT): start_kit writes this file from it where the
+# file is missing (the repository ignores *.kit).  Change both together; tests/test_kit.py compares them.
+[package]
+title = "ncntm Kit core (no renderer)"
+description = "Kit + omni.usd + usdrt + isaacsim.core.experimental.* without RTX, viewport or UI"
+version = "0.2.0"
+keywords = ["app", "usd"]
+
+[dependencies]
+"isaacsim.simulation_app" = {}
+"omni.usd" = {}
+"omni.kit.usd.layers" = {}
+"omni.kit.loop-isaac" = {}
+"omni.kit.primitive.mesh" = {}
+"omni.usd.schema.usd_particle_field" = {}
+"usdrt.scenegraph" = {}                     # Fabric / USDRT
+"omni.hydra.usdrt_delegate" = {}            # usdrt population utilities (needed by useFabricSceneDelegate)
+"isaacsim.core.experimental.utils" = {}     # stage / prim / xform helpers (loads omni.warp.core)
+"isaacsim.core.experimental.prims" = {}     # XformPrim, GeomPrim ... (loads PhysX and the simulation manager)
+"isaacsim.core.version" = {}
+
+[settings.app]
+name = "ncntm-kit-core"
+version = "0.2.0"
+content.emptyStageOnStart = false
+fastShutdown = true
+file.ignoreUnsavedStage = true
+hangDetector.enabled = false
+settings.persistent = false
+enableDeveloperWarnings = false
+runLoops.main.rateLimitEnabled = false
+useFabricSceneDelegate = true
+extensions.registryEnabled = false      # never try to download extensions
+
+[settings.exts."omni.usd"]
+locking.onClose = false
+
+[settings.persistent]
+app.stage.upAxis = "Z"
+simulation.defaultMetersPerUnit = 1.0
+''',
+}
 
 
 # ---- process-wide state ---------------------------------------------------------------------
@@ -326,7 +453,7 @@ def probe_graphics(timeout: float = 10.0, refresh: bool = False) -> GraphicsProb
     all give ``hardware = False`` with the reason.
 
     If __EGL_VENDOR_LIBRARY_DIRS is set (a conda environment points it at its own folder) and
-    no working NVIDIA device is found, the question is asked a second time without the
+    EGL lists no NVIDIA device at all, the question is asked a second time without the
     variable: it hides the system's drivers from EGL in this process, not from Vulkan, which
     is what RTX uses.  The reason says when that second answer is the one given.
 
@@ -340,18 +467,18 @@ def probe_graphics(timeout: float = 10.0, refresh: bool = False) -> GraphicsProb
     vendor_dirs = os.environ.get(EGL_VENDOR_VARIABLE)
     data, problem = _run_egl_probe(timeout, dict(os.environ))
     hint = ""
-    if vendor_dirs:
+    seen = data is not None and not data["error"] and any(d["nvidia"] for d in data["devices"])
+    if vendor_dirs and data is not None and not seen:
+        # The variable is set and EGL shows no NVIDIA device.  A conda environment sets it to its own folder, which
+        # hides the NVIDIA driver from EGL (not from Vulkan, which RTX uses): ask again the way the machine answers
+        # without it.  (If NVIDIA devices WERE listed, the variable hides nothing and there is nothing to ask again.)
         hint = f" (note: {EGL_VENDOR_VARIABLE}={vendor_dirs} limits which EGL drivers this process finds)"
-        found = data is not None and not data["error"] and any(d["nvidia"] and d["initialised"] for d in data["devices"])
-        if data is not None and not found:
-            # A conda environment sets this variable to its own folder, which hides the NVIDIA driver from EGL
-            # (not from Vulkan, which RTX uses).  Ask again the way the machine answers without it.
-            plain = {k: v for k, v in os.environ.items() if k != EGL_VENDOR_VARIABLE}
-            again, _ = _run_egl_probe(timeout, plain)
-            if again is not None and not again["error"] and any(d["nvidia"] for d in again["devices"]):
-                data = again
-                hint = (f" (seen with {EGL_VENDOR_VARIABLE}={vendor_dirs} ignored: that value hides the system's "
-                        "EGL drivers from this process)")
+        plain = {k: v for k, v in os.environ.items() if k != EGL_VENDOR_VARIABLE}
+        again, _ = _run_egl_probe(timeout, plain)
+        if again is not None and not again["error"] and any(d["nvidia"] for d in again["devices"]):
+            data = again
+            hint = (f" (seen with {EGL_VENDOR_VARIABLE}={vendor_dirs} ignored: that value hides the system's "
+                    "EGL drivers from this process)")
     seconds = round(time.perf_counter() - t0, 3)
     if data is None:
         probe = GraphicsProbe(False, problem + hint, seconds=seconds)
@@ -467,6 +594,33 @@ def isaac_extension_folders() -> list:
     return [folder]
 
 
+def experience_file(tier: str, root: str) -> str:
+    """The .kit file Kit is started with in ``tier`` ("" for tier "full": the stock application).
+
+    apps/<name>.kit of this package when it is there.  When it is not (the repository ignores
+    *.kit, so a fresh clone has no such file), the same text, kept in EXPERIENCE_TEXT, is
+    written to <root>/apps/<name>.kit and that file is used."""
+    name = EXPERIENCES[tier]
+    if not name:
+        return ""
+    packaged = os.path.join(APPS_DIR, name)
+    if os.path.isfile(packaged):
+        return packaged
+    folder = os.path.join(root, "apps")
+    path = os.path.join(folder, name)
+    text = EXPERIENCE_TEXT[tier]
+    try:
+        with open(path) as f:
+            if f.read() == text:
+                return path
+    except OSError:
+        pass
+    os.makedirs(folder, exist_ok=True)
+    with open(path, "w") as f:
+        f.write(text)
+    return path
+
+
 def _cuda_user() -> str:
     """Name of what has already initialised CUDA in this process, or ''."""
     torch = sys.modules.get("torch")
@@ -508,7 +662,13 @@ def _select_gpu(gpu) -> tuple:
         gpu = os.environ[ENV_GPU]
     visible = os.environ.get("CUDA_VISIBLE_DEVICES")
     if gpu is None:
-        return None, 0, "CUDA_VISIBLE_DEVICES " + (f"= {visible} (from the environment)" if visible is not None else "not set: all GPUs visible")
+        if visible is not None:
+            return None, 0, f"CUDA_VISIBLE_DEVICES = {visible} (from the environment)"
+        count = gpu_count()
+        if count > 1:
+            return None, 0, (f"CUDA_VISIBLE_DEVICES not set: all {count} GPUs are visible to Kit and CUDA "
+                             f"(start_kit(gpu=N) or {ENV_GPU}=N restricts this process to one)")
+        return None, 0, "CUDA_VISIBLE_DEVICES not set" + (": the one GPU of this machine is cuda:0" if count == 1 else "")
     gpu = int(gpu)
     if gpu < 0:
         raise ValueError(f"gpu must be a non-negative index, got {gpu}")
@@ -602,14 +762,18 @@ def _exit_hook() -> None:
     os._exit(code)
 
 
-def _install_exit_hook(app) -> None:
+def _install_exit_hook(app=None) -> None:
+    """Make the process leave through _exit_hook.  ``app`` is the SimulationApp, or None after
+    a start that failed half-way: Carbonite is loaded then, and its teardown at interpreter
+    exit crashes just the same (measured: the kernel ended with SIGSEGV)."""
     state = _state()
     if state["hook"]:
         return
-    try:
-        atexit.unregister(app._atexit_close)        # SimulationApp's own hook would start the teardown
-    except Exception:
-        pass
+    if app is not None:
+        try:
+            atexit.unregister(app._atexit_close)    # SimulationApp's own hook would start the teardown
+        except Exception:
+            pass
     state["kernel"] = in_jupyter()
     if not state["kernel"]:                         # a script's exit status must survive os._exit
         original_exit = sys.exit
@@ -789,6 +953,33 @@ def _newest_kit_log(root: str) -> str:
     return newest
 
 
+def _start_errors(capture_file: str, log: str, limit: int = 12) -> list:
+    """What Kit said went wrong while it started: the [Error] lines, with the lines that
+    continue them, of its console output during the start (quiet=True keeps that in a file),
+    else of its log file."""
+    for path in (capture_file, log):
+        if not path:
+            continue
+        try:
+            with open(path, errors="replace") as f:
+                lines = f.read().splitlines()
+        except OSError:
+            continue
+        said, taking = [], False
+        for line in lines:
+            stamped = line[:4].isdigit() and line[4:5] == "-"           # "2026-11-25T02:48:30Z [23ms] [Error] ..."
+            if "[Error]" in line:
+                taking = True
+                said.append(line.split("[Error]", 1)[1].strip()[:240])
+            elif stamped or not line.strip():
+                taking = False
+            elif taking:
+                said.append("  " + line.strip()[:240])
+        if said:
+            return said[:limit]
+    return []
+
+
 def _launch(tier: str, config: dict, root: str, quiet: bool):
     """Construct SimulationApp.  The only place that does.  Returns (app, info)."""
     capture_file = os.path.join(root, "logs", f"ncntm_start_{os.getpid()}.txt")
@@ -814,9 +1005,7 @@ def _launch(tier: str, config: dict, root: str, quiet: bool):
                 folders = [] if tier == "full" else isaac_extension_folders()
                 for folder in reversed(folders):
                     config["extra_args"][:0] = ["--ext-folder", folder]
-                experience = os.path.join(APPS_DIR, EXPERIENCES[tier]) if EXPERIENCES[tier] else ""
-                if experience and not os.path.isfile(experience):
-                    raise RuntimeError(f"the experience file {experience} is missing from the ncntm package")
+                experience = experience_file(tier, root)
                 import_seconds = time.perf_counter() - t0
                 _state()["tainted"] = f"the start of tier '{tier}' did not finish"       # until proven otherwise
                 app = SimulationApp(config, experience=experience)
@@ -826,12 +1015,24 @@ def _launch(tier: str, config: dict, root: str, quiet: bool):
         raise
     except BaseException as e:
         state = _state()
-        if state["tainted"]:
+        if state["tainted"]:                                # SimulationApp() was entered and did not come back
             log = _newest_kit_log(root)
             state["tainted"] = (f"the start of tier '{tier}' was cut short by {type(e).__name__}"
                                 + (f" (Kit log: {log})" if log else ""))
-            if isinstance(e, SystemExit):
-                raise RuntimeError(f"Kit did not start: {state['tainted']}. Restart the kernel before trying again.") from None
+            _install_exit_hook()                            # Carbonite is loaded: its teardown at exit would crash
+            if isinstance(e, SystemExit):                   # SimulationApp gave up (sys.exit): say what Kit said
+                said = _start_errors(capture_file if quiet else "", log)
+                told = "\nKit said:\n    " + "\n    ".join(said) if said else ""
+                if tier == "full":
+                    advice = "start_kit(tier='usd') starts Kit without the renderer, start_kit(tier='off') works without Kit."
+                else:
+                    advice = (f"If an extension could not be resolved, this Isaac Sim does not provide what the experience "
+                              f"{EXPERIENCES[tier]} asks for: start_kit(tier='full') starts the stock application instead, "
+                              "start_kit(tier='off') works without Kit.")
+                raise RuntimeError(
+                    f"Kit did not start (tier '{tier}').{told}\n" + (f"Full log: {log}\n" if log else "")
+                    + "What to do: restart the kernel first (a half-started Kit cannot be started again in this "
+                    + "process). " + advice) from None
         raise
     finally:
         sys.argv = saved_argv
@@ -874,16 +1075,21 @@ class PxrOrigin:
         return f"OpenUSD {self.version} ({'Kit' if self.is_kit else 'interpreter'} build, {self.path})"
 
 
+def _loaded(package: str) -> bool:
+    """True when ``package`` or one of its modules is in sys.modules."""
+    return any(name == package or name.startswith(package + ".") for name in list(sys.modules))
+
+
 def _pxr_loaded() -> bool:
-    return any(name == "pxr" or name.startswith("pxr.") for name in list(sys.modules))
+    return _loaded("pxr")
 
 
-def _pxr_importers(limit: int = 6) -> list:
-    """Names of the loaded modules (outside pxr itself) that imported pxr: the ones to move
-    behind start_kit().  "__main__" is the notebook or script itself."""
+def _importers(package: str, limit: int = 6) -> list:
+    """Names of the loaded modules (outside ``package`` itself) that imported it: the ones to
+    move behind start_kit().  "__main__" is the notebook or script itself."""
     found = []
     for name, module in list(sys.modules.items()):
-        if module is None or name == "pxr" or name.startswith("pxr.") or name == __name__:
+        if module is None or name == package or name.startswith(package + ".") or name == __name__:
             continue
         try:
             values = list(vars(module).values())
@@ -891,11 +1097,21 @@ def _pxr_importers(limit: int = 6) -> list:
             continue
         for value in values:
             owner = getattr(value, "__name__", "") if isinstance(value, type(sys)) else ""
-            if isinstance(owner, str) and (owner == "pxr" or owner.startswith("pxr.")):
+            if isinstance(owner, str) and (owner == package or owner.startswith(package + ".")):
                 found.append(name)
                 break
     found.sort(key=lambda name: (not name.startswith("ncntm."), name != "__main__", name))
     return found[:limit]
+
+
+def _pxr_importers(limit: int = 6) -> list:
+    return _importers("pxr", limit)
+
+
+def _said_by(package: str) -> str:
+    """" (by: ncntm.viz.stage, a cell of this notebook)", or "" when nobody can be named."""
+    names = ["a cell of this notebook" if name == "__main__" else name for name in _importers(package)]
+    return f" (by: {', '.join(names)})" if names else ""
 
 
 def pxr_origin(load: bool = None) -> PxrOrigin:
@@ -1105,7 +1321,8 @@ class Session:
             if probe.hardware:
                 why += "; a graphics device was found, so start_kit(tier='full') in a new kernel should give RTX"
             else:
-                why += "; " + probe.reason
+                why += (f"; the graphics probe says: {probe.reason}. To try RTX all the same: "
+                        f"start_kit(tier='full') in a new kernel, or {ENV_TIER}=full")
             status = RendererStatus(False, why)
         else:
             import omni.usd
@@ -1163,7 +1380,15 @@ class Session:
         else:
             lines.append(f"Isaac Sim: Kit {self.kit_version}, tier '{self.tier}', {self.extensions} extensions, "
                          f"started in {self.start_seconds} s")
-        lines.append(f"  chosen by {self.choice.source}: {self.choice.reason}")
+        if self.choice.source == "probe":                       # the reason is the graphics probe's: it is in the RTX line
+            found = self.choice.probe is not None and self.choice.probe.hardware
+            lines.append("  tier chosen automatically: "
+                         + (self.choice.reason if found else "no usable graphics device was found (see the RTX line)")
+                         + f"; {ENV_TIER} or start_kit(tier=...) overrides the choice")
+        elif self.choice.source == "no Isaac Sim":
+            lines.append(f"  tier 'off' because {self.choice.reason}")
+        else:
+            lines.append(f"  tier chosen by {self.choice.source}: {self.choice.reason}")
         origin = pxr_origin(load=True)
         usd = f"OpenUSD {origin.version} ({'Kit build' if origin.is_kit else 'interpreter build'})" if origin.imported \
             else "OpenUSD: pxr is not installed"
@@ -1324,9 +1549,13 @@ class Session:
         if mode is not None:
             change("/rtx/rendermode", mode)
             if mode == "PathTracing":
-                if spp is not None:
-                    change("/rtx/pathtracing/spp", int(spp))
-                per_frame = int(settings.get("/rtx/pathtracing/spp") or 1)
+                # Samples per pixel per sub-frame: the caller's, else what the session was started with -- not the
+                # setting as it stands, which Replicator rewrites when it stops (it puts back what it found at its
+                # first step: _set_capture_settings / _restore_settings in its orchestrator.py).
+                configured = getattr(self.app, "config", {}).get("samples_per_pixel_per_frame")
+                per_frame = int(spp) if spp is not None else int(configured or 64)
+                change("/rtx/pathtracing/spp", per_frame)
+                change("/rtx/pathtracing/clampSpp", per_frame)                      # SimulationApp keeps these two equal
                 change("/rtx/pathtracing/totalSpp", per_frame * int(subframes))     # accumulate over all subframes
             else:
                 change("/rtx/post/dlss/execMode", 2)            # DLSS "Quality": Performance damages edges in small pictures
@@ -1363,7 +1592,8 @@ class Session:
         many times, so that the real-time denoiser settles or the path tracer accumulates);
         the timeline does not advance.  Capture-on-play is switched off.
         mode   "RealTimePathTracing" (RTX Real-Time 2.0) or "PathTracing" (RTX Interactive;
-               ``spp`` samples per pixel per sub-frame, default: the application's setting).
+               ``spp`` samples per pixel per sub-frame, default: what the application was
+               started with, 64; the picture accumulates ``spp * subframes`` samples).
         Gaussian splats converge slowly: NVIDIA's own configuration uses 800 accumulation
         steps; raise ``subframes`` if the picture is noisy.  If splat prims do not show at all,
         look at ``session.log_lines("geometry streaming")``: RTX may ask for a new kernel
@@ -1432,8 +1662,10 @@ def _refuse_if_impossible(tier: str) -> dict:
             "start_kit(tier='off').")
     if _pxr_loaded():
         origin = pxr_origin(load=False)
-        importers = ["a cell of this notebook" if name == "__main__" else name for name in _pxr_importers()]
-        by = f" (by: {', '.join(importers)})" if importers else ""
+        by = _said_by("pxr")
+        session = current_session()
+        if not by and session is not None and not session.kit_running:
+            by = " (by the Kit-free session this kernel already has)"
         raise RuntimeError(
             f"pxr (OpenUSD {origin.version} from {origin.path}) was imported in this process before Kit was started{by}. "
             "Kit brings its own OpenUSD build and cannot start once another one is loaded (it fails with undefined "
@@ -1444,6 +1676,18 @@ def _refuse_if_impossible(tier: str) -> dict:
             "Import pxr and the modules that use it (ncntm.viz.stage, ncntm.viz.usd_to_emray) only AFTER that, "
             "on a later line or in a later cell.\n"
             "Or stay without Kit in this kernel: kit.start_kit(tier='off').")
+    if tier in KIT_WARP_TIERS and _loaded("warp"):
+        version = str(getattr(sys.modules.get("warp"), "__version__", "") or "")
+        raise RuntimeError(
+            f"warp{' ' + version if version else ''} was imported in this process before Kit was started"
+            f"{_said_by('warp')}. Tier '{tier}' loads the Warp that Isaac Sim ships (extension omni.warp.core), and two "
+            "Warp builds in one process do not mix: the first Warp array then fails with an ImportError.\n"
+            "What to do: Restart the kernel and let these be the first two lines that run:\n"
+            "    from ncntm.viz import kit\n"
+            "    session = kit.start_kit()\n"
+            "Import warp and the modules that use it (ncntm.viz.emray, ncntm.viz.usd_to_emray) only AFTER that, "
+            "on a later line or in a later cell.\n"
+            "Tier 'usd' brings no Warp of its own and can start as things are: kit.start_kit(tier='usd').")
     accepted, how = licence_status()
     if not accepted:
         markers = licence_markers(install)
@@ -1474,14 +1718,16 @@ def start_kit(tier: str = "auto", gpu=None, root=None, quiet: bool = True, *, li
 
     ALWAYS returns a Session, never None: for tier "off" (asked for, or because Isaac Sim is
     not installed) it is the Kit-free session, ``session.app is None``.  Must be the first
-    thing in the process that touches pxr, omni or CUDA: in a notebook the first cell is
+    thing in the process that touches pxr, warp, omni or CUDA: in a notebook the first cell is
 
-        from ncntm.viz import kit            # imports neither pxr nor Isaac Sim
+        from ncntm.viz import kit            # imports neither pxr nor warp nor Isaac Sim
         session = kit.start_kit()
 
-    and ``ncntm.viz.stage`` / ``ncntm.viz.usd_to_emray`` / ``pxr`` are imported after it.
-    Raises RuntimeError with what to do when Kit cannot be started (pxr already imported,
-    licence not accepted, a start that was cut short earlier).
+    and ``ncntm.viz.stage`` / ``ncntm.viz.usd_to_emray`` / ``ncntm.viz.emray`` / ``pxr`` /
+    ``warp`` are imported after it.
+    Raises RuntimeError with what to do when Kit cannot be started (pxr already imported;
+    warp already imported and the tier is "core" or "full"; licence not accepted; Kit itself
+    gave up, with what it said; a start that was cut short earlier).
 
     Tier "full" on a machine with RTX: the first start with a new ``root`` compiles the RTX
     shaders into ``<root>/cache`` and can take minutes; later starts take tens of seconds."""
@@ -1512,6 +1758,13 @@ def start_kit(tier: str = "auto", gpu=None, root=None, quiet: bool = True, *, li
     _refuse_if_impossible(choice.tier)
     if livestream and choice.tier != "full":
         raise ValueError("livestream=True needs tier 'full'")
+    if choice.tier not in KIT_WARP_TIERS and choice.source != "argument" and _loaded("warp"):
+        # works here, but the same notebook is refused where the automatic choice is another tier: say so now
+        warnings.warn(
+            f"warp was imported before kit.start_kit(){_said_by('warp')}. Tier '{choice.tier}' does not mind, but where "
+            "start_kit() chooses tier 'full' (a machine whose RTX renderer works) this order is refused: import warp "
+            "and the modules that use it (ncntm.viz.emray, ncntm.viz.usd_to_emray) after start_kit().",
+            RuntimeWarning, stacklevel=2)
     root = os.path.abspath(os.path.expanduser(os.fspath(root))) if root else default_root()
     for folder in (root, os.path.join(root, "tmp")):
         os.makedirs(folder, exist_ok=True)
@@ -1522,8 +1775,6 @@ def start_kit(tier: str = "auto", gpu=None, root=None, quiet: bool = True, *, li
     if in_jupyter():
         os.environ.setdefault("ISAAC_JUPYTER_KERNEL", "1")      # isaacsim then applies nest_asyncio
         protect_queued_cells()                                  # "Run All" must not lose cells
-    tempfile.gettempdir()                                       # Python keeps the temp folder it has ...
-    os.environ["TMPDIR"] = os.path.join(root, "tmp")            # ... Kit's native code gets its own
 
     args = [STDOUT_ARG, *PRIVACY_ARGS, excluded_extensions_arg()]
     if quiet:
@@ -1544,7 +1795,19 @@ def start_kit(tier: str = "auto", gpu=None, root=None, quiet: bool = True, *, li
         if livestream:
             config.update({"hide_ui": False, "window_width": 1920, "window_height": 1080, "display_options": 3286})
 
-    app, info = _launch(choice.tier, config, root, quiet)
+    # TMPDIR for the time of the start only: Kit's native code (Carbonite, OpenUSD) reads it once and keeps the
+    # folder.  Left in place it broke Warp: NVRTC of CUDA 12.9 (Kit's Warp 1.17) refuses a TMPDIR longer than about
+    # 120 characters, so every kernel compilation failed in a session with a long root.
+    tempfile.gettempdir()                                       # Python keeps the temp folder it has
+    saved_tmpdir = os.environ.get("TMPDIR")
+    os.environ["TMPDIR"] = os.path.join(root, "tmp")
+    try:
+        app, info = _launch(choice.tier, config, root, quiet)
+    finally:
+        if saved_tmpdir is None:
+            os.environ.pop("TMPDIR", None)
+        else:
+            os.environ["TMPDIR"] = saved_tmpdir
     _install_exit_hook(app)
     try:
         session = state["session"] = Session(choice.tier, choice, app=app, root=root, gpu=gpu, cuda_index=cuda_index,

@@ -52,8 +52,21 @@ from types import SimpleNamespace
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
+KIT_PY = REPO / "ncntm" / "viz" / "kit.py"
 
-from ncntm.viz import kit  # noqa: E402   (pure Python: imports neither pxr nor isaacsim)
+# Python source that binds ``kit`` to ncntm/viz/kit.py loaded BY PATH, for child processes of the Kit-free tests:
+# kit.py imports nothing but the standard library, the package around it needs numpy.
+LOAD_KIT_BY_PATH = (
+    "import importlib.util, sys\n"
+    f"_spec = importlib.util.spec_from_file_location('ncntm_viz_kit_by_path', {str(KIT_PY)!r})\n"
+    "kit = importlib.util.module_from_spec(_spec)\n"
+    "sys.modules[_spec.name] = kit\n"
+    "_spec.loader.exec_module(kit)\n")
+
+try:
+    from ncntm.viz import kit  # noqa: E402   (pure Python: imports neither pxr nor warp nor isaacsim)
+except ImportError:            # the package imports numpy; without it the tests that need no kernel still run
+    exec(LOAD_KIT_BY_PATH)
 
 INSTALLER = REPO / "scripts" / "install_kernel.py"
 KERNEL_NAME = "ncntm-isaacsim"
@@ -160,7 +173,7 @@ def test_installer_writes_the_spec_it_prints_and_uninstalls():
     lib_b.mkdir(exist_ok=True)
     code, text = run_installer("--prefix", prefix, "--python", sys.executable, "--accept-eula", "--name", "ncntm-test",
                                "--display-name", "A test kernel", "--lib-path", lib_a, "--lib-path", lib_b,
-                               "--preload", "/somewhere/libgomp.so.1", "--egl-vendor-dirs", "/etc/egl:/usr/egl")
+                               "--preload", "/somewhere/libgomp.so.1", "--egl-vendor-dirs", "/etc/egl:/usr/egl", "--gpu", "3")
     assert code == 0, text
     spec = spec_of(prefix, "ncntm-test")
     assert spec["argv"] == [sys.executable, "-m", "ipykernel_launcher", "-f", "{connection_file}"]
@@ -168,6 +181,7 @@ def test_installer_writes_the_spec_it_prints_and_uninstalls():
     env = spec["env"]
     assert env["ISAAC_JUPYTER_KERNEL"] == "1" and env["CUDA_DEVICE_ORDER"] == "PCI_BUS_ID"
     assert env["OMNI_KIT_ACCEPT_EULA"] == "YES"                           # only because of --accept-eula
+    assert env[kit.ENV_GPU] == "3"                                        # only because of --gpu: the default of start_kit(gpu=)
     assert env["LD_LIBRARY_PATH"] == f"{lib_a}{os.pathsep}{lib_b}"
     assert env["LD_PRELOAD"] == "/somewhere/libgomp.so.1"
     assert env["__EGL_VENDOR_LIBRARY_DIRS"] == "/etc/egl:/usr/egl"
@@ -181,6 +195,7 @@ def test_installer_writes_the_spec_it_prints_and_uninstalls():
     assert code == 0 and "replaced the kernel spec that was there" in text, text
     again = spec_of(prefix, "ncntm-test")
     assert "OMNI_KIT_ACCEPT_EULA" not in again["env"] and "NOT accepted for you" in text
+    assert kit.ENV_GPU not in again["env"]                                # no --gpu: the kernel is not tied to a GPU
     assert again["argv"] == spec["argv"]
     assert os.listdir(prefix / "share" / "jupyter" / "kernels") == ["ncntm-test"]      # one spec, not two
 
@@ -466,9 +481,47 @@ def test_installer_says_how_to_install_ipykernel():
     assert "ipykernel is NOT importable" in text and f"{broken} -m pip install ipykernel" in text
 
 
+def test_installer_preload_names_torch_as_isaac_sim_will():
+    """aarch64, pip install: Isaac Sim refuses to import unless LD_PRELOAD holds, as TEXT, every file of
+    glob(torch.__path__[0] + ".libs/libgomp*").  With the environment behind a symbolic link the resolved
+    path is another text; the installer must write the one Isaac Sim will compare with."""
+    real = out_dir() / "torch_real" / "site-packages"
+    (real / "torch").mkdir(parents=True, exist_ok=True)
+    (real / "torch" / "__init__.py").write_text("")
+    (real / "torch.libs").mkdir(exist_ok=True)
+    (real / "torch.libs" / "libgomp-stand-in.so.1").write_text("")
+    link = out_dir() / "torch_link"
+    if not link.exists():
+        os.symlink(real.parent, link)
+    module = installer_module()
+    env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+    env.update(PYTHONPATH=str(link / "site-packages"), PYTHONDONTWRITEBYTECODE="1")
+    done = subprocess.run([sys.executable, "-c", module.PROBE], capture_output=True, text=True, env=env, timeout=120)
+    line = [line for line in done.stdout.splitlines() if line.startswith(module.MARKER)]
+    assert line, done.stdout + done.stderr
+    probe = json.loads(line[0][len(module.MARKER):])
+    expected = str(link / "site-packages" / "torch.libs" / "libgomp-stand-in.so.1")
+    assert probe["torch_gomp"] == [expected], probe["torch_gomp"]         # through the link, as torch.__path__[0] is
+    # ... which is exactly what Isaac Sim's own check computes in that interpreter
+    check = ("import glob, os, torch\n"
+             "print('ISAAC ' + ':'.join(glob.glob(os.path.join(f'{torch.__path__[0]}.libs', 'libgomp*'))))")
+    done = subprocess.run([sys.executable, "-c", check], capture_output=True, text=True, env=env, timeout=120)
+    assert f"ISAAC {expected}" in done.stdout, done.stdout + done.stderr
+    args = SimpleNamespace(lib_path=None, egl_vendor_dirs=None, preload=None, accept_eula=False)
+    saved = module.is_arm
+    try:
+        module.is_arm = lambda: True
+        on_arm, _ = module.kernel_environment(args, probe)
+    finally:
+        module.is_arm = saved
+    assert expected in on_arm["LD_PRELOAD"].split(os.pathsep)
+
+
 def test_installer_rejects_bad_input():
     code, text = run_installer("--dry-run", "--name", "bad name", "--python", sys.executable)
     assert code == 2 and "kernel name" in text
+    code, text = run_installer("--dry-run", "--gpu", "-1", "--python", sys.executable)
+    assert code == 2 and "GPU index" in text
     code, text = run_installer("--dry-run", "--python", out_dir() / "does_not_exist")
     assert code != 0 and "does not exist" in text
     code, text = run_installer("--user", "--prefix", out_dir() / "z")       # mutually exclusive
@@ -510,13 +563,14 @@ def test_probe_graphics_is_structured_cheap_and_safe():
 
     def stand_in(timeout, env):
         asked.append(kit.EGL_VENDOR_VARIABLE in env)
-        hidden = kit.EGL_VENDOR_VARIABLE in env
+        hidden = hides and kit.EGL_VENDOR_VARIABLE in env
         return {"library": "libEGL.so.1", "error": "", "client_extensions": "",
                 "devices": [device(False)] if hidden else [device(True, *answer), device(False)]}, ""
 
     saved_run, saved_value = kit._run_egl_probe, os.environ.get(kit.EGL_VENDOR_VARIABLE)
     try:
         kit._run_egl_probe = stand_in
+        hides = True                                                      # the variable points into a conda environment
         os.environ[kit.EGL_VENDOR_VARIABLE] = "/opt/conda/share/glvnd/egl_vendor.d"
         asked, answer = [], (True,)                                       # a DGX Spark inside a conda environment
         hidden = kit.probe_graphics(refresh=True)
@@ -525,6 +579,17 @@ def test_probe_graphics_is_structured_cheap_and_safe():
         asked, answer = [], (False, "EGL_BAD_ACCESS")                     # the development host inside a conda environment
         hidden = kit.probe_graphics(refresh=True)
         assert asked == [True, False] and not hidden.hardware and hidden.errors == ("EGL_BAD_ACCESS",)
+        # The kernel spec of install_kernel.py sets the variable to the SYSTEM folders: the NVIDIA devices are listed
+        # with it.  Then it hides nothing: no second question, and the reason must not blame the variable.
+        hides = False
+        os.environ[kit.EGL_VENDOR_VARIABLE] = "/etc/glvnd/egl_vendor.d:/usr/share/glvnd/egl_vendor.d"
+        asked, answer = [], (False, "EGL_BAD_ACCESS")                     # the development host, kernel from the spec
+        plain = kit.probe_graphics(refresh=True)
+        assert asked == [True] and not plain.hardware and plain.errors == ("EGL_BAD_ACCESS",)
+        assert "ignored" not in plain.reason and "hides" not in plain.reason and kit.EGL_VENDOR_VARIABLE not in plain.reason
+        asked, answer = [], (True,)                                       # a DGX Spark, kernel from the spec
+        plain = kit.probe_graphics(refresh=True)
+        assert asked == [True] and plain.hardware and kit.EGL_VENDOR_VARIABLE not in plain.reason
         del os.environ[kit.EGL_VENDOR_VARIABLE]
         asked, answer = [], (True,)
         assert kit.probe_graphics(refresh=True).hardware and asked == [False]         # no variable: asked once
@@ -628,17 +693,144 @@ def test_renderer_complaint_picks_the_telling_line():
 
 
 def test_experience_files_have_no_paths():
+    assert set(kit.EXPERIENCE_TEXT) == {tier for tier, name in kit.EXPERIENCES.items() if name}
     for tier, name in kit.EXPERIENCES.items():
         if not name:
             continue
-        text = (Path(kit.APPS_DIR) / name).read_text()
+        text = kit.EXPERIENCE_TEXT[tier]
         code = [line.split("#", 1)[0] for line in text.splitlines()]
         assert not any("/home" in line or "${" in line or "folders" in line for line in code), name
         assert '"omni.usd"' in text and '"omni.usd.schema.usd_particle_field"' in text
         assert "registryEnabled = false" in text                           # never downloads extensions
+        packaged = Path(kit.APPS_DIR) / name
+        if packaged.is_file():                                             # the file, where it travelled with the package,
+            assert packaged.read_text() == text, f"{packaged} and kit.EXPERIENCE_TEXT[{tier!r}] differ: change both"
     for arg in kit.PRIVACY_ARGS:
         assert arg.startswith("--/") and arg.endswith(("=false", "=true"))
     assert kit.excluded_extensions_arg() == '--/app/extensions/excluded=["omni.kit.telemetry"]'
+
+
+def test_experience_file_is_written_where_the_package_has_none():
+    """The repository ignores *.kit, so a clone has no apps/*.kit: start_kit then writes the experience from the
+    text kept in kit.py into the Kit folder and starts Kit with that file."""
+    root = out_dir() / "experience_root"
+    saved = kit.APPS_DIR
+    try:
+        kit.APPS_DIR = str(out_dir() / "no_apps_here")
+        for tier in ("usd", "core"):
+            path = kit.experience_file(tier, str(root))
+            assert path == str(root / "apps" / kit.EXPERIENCES[tier]) and Path(path).read_text() == kit.EXPERIENCE_TEXT[tier]
+            written = os.stat(path).st_mtime_ns
+            assert kit.experience_file(tier, str(root)) == path and os.stat(path).st_mtime_ns == written     # not rewritten
+            Path(path).write_text("# an older text\n")
+            assert Path(kit.experience_file(tier, str(root))).read_text() == kit.EXPERIENCE_TEXT[tier]      # brought up to date
+        assert kit.experience_file("full", str(root)) == ""               # the stock application has its own
+    finally:
+        kit.APPS_DIR = saved
+    for tier in ("usd", "core"):                                           # with the package's file there, that file is used
+        packaged = Path(kit.APPS_DIR) / kit.EXPERIENCES[tier]
+        if packaged.is_file():
+            assert kit.experience_file(tier, str(root)) == str(packaged)
+
+
+def test_every_start_carries_the_privacy_switches():
+    """Whatever the tier and the arguments: the configuration start_kit hands to SimulationApp has the crash
+    reporter and telemetry switches, and SimulationApp is constructed in ONE place of the repository."""
+    import ast
+    calls = {}
+    for folder in ("ncntm", "scripts", "tests"):
+        for path in sorted((REPO / folder).rglob("*.py")):
+            try:
+                tree = ast.parse(path.read_text())
+            except SyntaxError:
+                continue                                                   # another module mid-edit: not this test's business
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Call):
+                    name = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
+                    if name == "SimulationApp":
+                        calls.setdefault(str(path.relative_to(REPO)), []).append(node.lineno)
+    assert list(calls) == [os.path.join("ncntm", "viz", "kit.py")] and len(calls[os.path.join("ncntm", "viz", "kit.py")]) == 1, calls
+    notebooks = REPO / "notebooks"
+    for path in sorted(notebooks.rglob("*.ipynb")) if notebooks.is_dir() else []:
+        if ".ipynb_checkpoints" in path.parts:
+            continue
+        try:
+            cells = json.loads(path.read_text()).get("cells", [])
+        except ValueError:
+            continue
+        for cell in cells:
+            source = "".join(cell.get("source", [])) if cell.get("cell_type") == "code" else ""
+            assert "SimulationApp(" not in source, f"{path} starts Isaac Sim itself: use ncntm.viz.kit.start_kit()"
+
+    seen = []
+
+    class Stop(Exception):
+        pass
+
+    def launch(tier, config, root, quiet):
+        seen.append((tier, dict(config), os.environ.get("TMPDIR")))
+        raise Stop()
+
+    saved = (kit._launch, kit._refuse_if_impossible, kit._no_core_files, kit._select_gpu, kit.in_jupyter)
+    saved_tmpdir, saved_state = os.environ.get("TMPDIR"), dict(kit._state())
+    root = out_dir() / "switches_root"
+    try:
+        kit._launch, kit._refuse_if_impossible, kit._no_core_files = launch, (lambda tier: {}), (lambda *a, **k: None)
+        kit._select_gpu, kit.in_jupyter = (lambda gpu: (gpu, 0, "stand-in")), (lambda: False)
+        kit._state().update(session=None, tainted="")
+        for tier, extra in (("usd", {}), ("core", {"quiet": False}), ("full", {}), ("full", {"livestream": True, "gpu": 0}),
+                            ("usd", {"extra_args": ["--/app/something=1"]})):
+            assert raises(Stop, kit.start_kit, tier, root=str(root), **extra)
+            tier_seen, config, tmpdir = seen[-1]
+            assert tier_seen == tier
+            for arg in kit.PRIVACY_ARGS + (kit.excluded_extensions_arg(), kit.STDOUT_ARG):
+                assert arg in config["extra_args"], (tier, arg)
+            assert config["enable_crashreporter"] is False and config["headless"] is True and config["multi_gpu"] is False
+            assert tmpdir == str(root / "tmp")                             # Kit's temporary files: its own folder while it starts ...
+            assert os.environ.get("TMPDIR") == saved_tmpdir                # ... and the variable is put back afterwards
+        assert seen[3][1]["active_gpu"] == 0 and seen[3][1]["hide_ui"] is False and "active_gpu" not in seen[2][1]
+        assert seen[4][1]["extra_args"][-1] == "--/app/something=1"
+    finally:
+        kit._launch, kit._refuse_if_impossible, kit._no_core_files, kit._select_gpu, kit.in_jupyter = saved
+        kit._state().clear()
+        kit._state().update(saved_state)
+
+
+def test_describe_says_why_once_and_how_to_override():
+    """describe() for a tier that the graphics probe chose: the probe's sentence appears once (in the RTX line),
+    with the way to try RTX all the same."""
+    probe = kit.GraphicsProbe(False, "no NVIDIA EGL device: the 1 device found is software (Mesa)")
+    session = kit.Session("off", kit.TierChoice("off", "probe", probe.reason, probe), gpu_note="stand-in")
+    saved = kit.pxr_origin
+    try:
+        kit.pxr_origin = lambda load=None: kit.PxrOrigin(True, "26.08", "/somewhere/pxr", False)
+        text = session.describe()
+    finally:
+        kit.pxr_origin = saved
+    assert text.count(probe.reason) == 1, text
+    lines = text.splitlines()
+    assert lines[1].startswith("  tier chosen automatically: ") and kit.ENV_TIER in lines[1] and "start_kit(tier=" in lines[1]
+    rtx = [line for line in lines if line.strip().startswith("RTX renderer: ")]
+    assert len(rtx) == 1 and "not available on this machine because " in rtx[0] and probe.reason in rtx[0]
+    assert "start_kit(tier='full')" in rtx[0] and f"{kit.ENV_TIER}=full" in rtx[0]
+    found = kit.GraphicsProbe(True, "an NVIDIA EGL device initialised (EGL 1.5, 1 NVIDIA device found)", devices=1, nvidia_devices=1, initialised=1)
+    session = kit.Session("off", kit.TierChoice("off", "argument", "start_kit(tier='off') was asked for", found), gpu_note="stand-in")
+    assert "start_kit(tier='full') in a new kernel should give RTX" in session.renderer_status().reason
+
+
+def test_importing_kit_loads_nothing_heavy():
+    """``from ncntm.viz import kit`` is the first line of every notebook: it must not load pxr or warp (which have
+    to come after start_kit), nor Isaac Sim, nor torch."""
+    code = ("import sys\nsys.path.insert(0, sys.argv[1])\n"
+            "try:\n    from ncntm.viz import kit\nexcept ImportError as error:\n    print('NO PACKAGE', error); raise SystemExit(0)\n"
+            "import ncntm.viz\n"
+            "heavy = sorted({name.split('.')[0] for name in sys.modules} & {'pxr', 'warp', 'isaacsim', 'omni', 'carb', 'torch'})\n"
+            "print('HEAVY', heavy, kit._pxr_loaded(), kit._loaded('warp'))\n")
+    env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
+    done = subprocess.run([sys.executable, "-c", code, str(REPO)], capture_output=True, text=True, env=env, timeout=120)
+    if "NO PACKAGE" in done.stdout:
+        skip(f"the package ncntm.viz cannot be imported by {sys.executable} ({done.stdout.strip()}): nothing to check")
+    assert "HEAVY [] False False" in done.stdout, done.stdout + done.stderr
 
 
 def test_only_kit_py_imports_isaac_sim():
@@ -693,7 +885,7 @@ def test_licence_markers_follow_the_layout():
     pip = out_dir() / "licence_pip" / "site-packages"
     (pip / "isaacsim" / "kit").mkdir(parents=True, exist_ok=True)
     (pip / "isaacsim" / "__init__.py").write_text("")
-    code = ("import json, sys\nsys.path.insert(0, sys.argv[1])\nfrom ncntm.viz import kit\n"
+    code = ("import json\n" + LOAD_KIT_BY_PATH +
             "print('RESULT ' + json.dumps({'install': kit.isaacsim_install(), 'status': list(kit.licence_status()), "
             "'markers': kit.licence_markers()}))")
 
@@ -1032,16 +1224,16 @@ def start_cell(tier, extra=""):
 def notebook_off():
     """Tier "off" in the Isaac kernel: author a dataset with ncntm.viz.stage, build the generic
     stage, measure both through the session."""
-    kernel = Kernel("off")
+    kernel = Kernel("off", env={kit.ENV_TIER: "off"})                      # the tier comes from NCNTM_KIT, not from an argument
     r = SimpleNamespace()
     try:
         kernel.timing["tier"] = "off"
         r.start = kernel.run("import resource\ncore_before = list(resource.getrlimit(resource.RLIMIT_CORE))\n"
-                             + start_cell("off") + "import subprocess\n"
+                             + PRELUDE + f"s = kit.start_kit(gpu={GPU})\n" + "import subprocess\n"
                              "child = subprocess.run([sys.executable, '-c', 'import sys; sys.path.insert(0, sys.argv[1]); "
                              "from ncntm.viz import kit; print(kit.in_jupyter())', os.environ['NCNTM_TEST_REPO']], "
                              "capture_output=True, text=True, timeout=120).stdout.strip()\n"
-                             "print('RESULT ' + json.dumps({'tier': s.tier, 'app': s.app is None, "
+                             "print('RESULT ' + json.dumps({'tier': s.tier, 'app': s.app is None, 'source': s.choice.source, "
                              "'usd': s.usd_version, 'kit_usd': kit.pxr_origin().is_kit, 'isaacsim': 'isaacsim' in sys.modules, "
                              "'available': s.renderer_available, 'describe': s.describe(), 'in_jupyter': kit.in_jupyter(), "
                              "'child_in_jupyter': child, 'child_has_parent_pid': bool(os.environ.get('JPY_PARENT_PID')), "
@@ -1075,19 +1267,22 @@ def notebook_usd():
                  "if 'before' not in globals():\n"
                  "    before = {'argv': list(sys.argv), 'stdout': id(sys.stdout), 'tmp': tempfile.gettempdir(),\n"
                  "              'sigint': repr(signal.getsignal(signal.SIGINT)), 'origin': str(kit.pxr_origin()),\n"
-                 "              'pxr_loaded': 'pxr' in sys.modules, 'session': kit.current_session() is None}\n"
+                 "              'pxr_loaded': 'pxr' in sys.modules, 'session': kit.current_session() is None,\n"
+                 "              'tmpdir': os.environ.get('TMPDIR')}\n"
                  "    import resource\n"
                  "    before['core_limit'] = list(resource.getrlimit(resource.RLIMIT_CORE))\n"
                  f"s = kit.start_kit('usd', gpu={GPU})\n"
                  "print(s.describe())\n")
         r.first = kernel.run(first)
         r.facts = kernel.run(
-            "import resource\n"
+            "import glob, resource\n"
             "print('printed in a later cell')\n"
             "print('RESULT ' + json.dumps({'tier': s.tier, 'start_seconds': s.start_seconds, 'errors': s.kit_errors(),\n"
             "    'extensions': s.extensions, 'usd': s.usd_version, 'kit_usd': kit.pxr_origin().is_kit, 'warp': s.warp_version,\n"
             "    'device': s.device, 'args': s.launch_args, 'args_from_kit': s.launch_args_from_kit, 'privacy': s.privacy(),\n"
             "    'root': s.root, 'log': s.log_file, 'tmpdir': os.environ.get('TMPDIR'), 'python_tmp': tempfile.gettempdir(),\n"
+            "    'root_tmp': sorted(os.listdir(os.path.join(s.root, 'tmp'))),\n"
+            "    'crash_stubs': glob.glob('/var/tmp/st_*.' + str(os.getpid())),\n"
             "    'before': before, 'argv': list(sys.argv), 'stdout': id(sys.stdout), 'sigint': repr(signal.getsignal(signal.SIGINT)),\n"
             "    'core_limit': list(resource.getrlimit(resource.RLIMIT_CORE)), 'visible': os.environ.get('CUDA_VISIBLE_DEVICES'),\n"
             "    'jupyter_flag': os.environ.get('ISAAC_JUPYTER_KERNEL'), 'session_id': id(s), 'pid': os.getpid(),\n"
@@ -1260,7 +1455,9 @@ def test_kit_writes_into_its_root_only():
     assert "--portable-root" in args and args[args.index("--portable-root") + 1] == root
     assert "--portable" not in args                                        # that would mean: write into the installation
     assert facts["root"] == root and facts["log"].startswith(root) and os.path.isfile(facts["log"])
-    assert facts["tmpdir"] == os.path.join(root, "tmp")                    # Kit's native temporary files
+    assert any(name.startswith("carb.") for name in facts["root_tmp"]), facts["root_tmp"]     # Kit's native temporary files are in its folder
+    assert facts["crash_stubs"] == []                                      # ... and OpenUSD's crash file is not in /var/tmp
+    assert facts["tmpdir"] == facts["before"]["tmpdir"]                    # TMPDIR itself is as it was (a long one breaks Warp's compiler)
     assert facts["python_tmp"] == facts["before"]["tmp"]                   # Python's tempfile is left alone
     assert facts["start_output"] is not None                               # Kit's console output of the start, kept in a file
     assert not any("-f" == a or a.endswith(".json") for a in args)         # the kernel's own argv did not reach Kit
@@ -1302,6 +1499,7 @@ def test_tier_off_gives_identical_stage_measurements():
     off = r.off
     start = need_openusd_without_kit(off)
     assert start["tier"] == "off" and start["app"] is True and start["isaacsim"] is False
+    assert start["source"] == kit.ENV_TIER and f"tier chosen by {kit.ENV_TIER}" in start["describe"]      # NCNTM_KIT=off decided
     assert start["kit_usd"] is False and start["available"] is False
     assert "not running (tier 'off')" in start["describe"]
     built_in_kit = result(r.build)
@@ -1406,7 +1604,7 @@ def test_default_root_is_in_the_home_cache_not_in_the_installation():
         kernel.timing["tier"] = "usd"
         started = kernel.run(start_cell("usd") + "print('RESULT ' + json.dumps({'root': s.root, 'default': kit.default_root(), "
                              "'args': s.launch_args, 'log': s.log_file, 'errors': s.kit_errors(), 'start_seconds': s.start_seconds, "
-                             "'tmpdir': os.environ['TMPDIR'], 'isaac': os.environ['ISAAC_PATH']}))")
+                             "'root_tmp': os.listdir(os.path.join(s.root, 'tmp')), 'isaac': os.environ['ISAAC_PATH']}))")
     finally:
         timing = kernel.shutdown()
     facts = result(started)
@@ -1415,7 +1613,7 @@ def test_default_root_is_in_the_home_cache_not_in_the_installation():
     assert facts["root"] == facts["default"] == root and facts["errors"] == []
     args = facts["args"]
     assert args[args.index("--portable-root") + 1] == root and "--portable" not in args
-    assert facts["log"].startswith(root) and facts["tmpdir"] == os.path.join(root, "tmp")
+    assert facts["log"].startswith(root) and any(name.startswith("carb.") for name in facts["root_tmp"])
     assert not root.startswith(facts["isaac"])                             # not inside the Isaac Sim installation
     assert sorted(os.listdir(root)) == ["cache", "data", "logs", "tmp"]
     assert timing["exit_code"] == 0

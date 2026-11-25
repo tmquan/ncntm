@@ -1,0 +1,2444 @@
+{
+ "layout_version": 1,
+ "axis_order": "zyx",
+ "id_note": "original ids are written as strings because uint64 ids exceed the exact range of JSON numbers",
+ "layout": {
+  "raw": "uint8 (z, y, x), gzip 4, chunked: EM intensity, source values untouched",
+  "instance": "smallest unsigned integer type (z, y, x), gzip 4, chunked: compact ids 0..K, 0 = background, 1 = largest instance (absent for image-only samples)",
+  "instance_original_ids": "uint64 (K+1,): original id of compact id i, entry 0 is 0",
+  "instance_voxel_counts": "uint32 (K+1,): voxels of compact id i inside the crop, entry 0 counts background",
+  "instance_bbox_zyx": "int32 (K+1, 6): z0, y0, x0, z1, y1, x1 in crop voxels, upper bounds exclusive; row 0 (background) is all zeros",
+  "root attributes": "layout_version, sample, dataset_name, voxel_size_zyx_nm, axis_order, physical_extent_zyx_nm, source_path, source_dataset, source_label_path, source_label_dataset, source_offset_zyx, source_shape_zyx, source_full_shape_zyx, intensity_norm_min, intensity_norm_max, intensity_norm_source, intensity_p01, intensity_p99, label_convention, instance_id_order, n_instances, skeleton_subject_ids, species, tissue, imaging_modality, citation, licence, notes"
+ },
+ "total_bytes": 151775366,
+ "samples": [
+  {
+   "name": "snemi3d",
+   "file": "snemi3d.h5",
+   "role": "core",
+   "dataset_name": "SNEMI3D, stack AC3 (the challenge test stack; image identical to test_inputs.h5)",
+   "species": "mouse (Mus musculus)",
+   "tissue": "somatosensory cortex (S1)",
+   "imaging_modality": "ssSEM (ATUM tape collection + SEM)",
+   "citation": "Kasthuri, N. et al. (2015), Saturated Reconstruction of a Volume of Neocortex, Cell 162(3):648-661.",
+   "licence": "not stated in the local docs (nanoCosmos doc/DATASETS.md, scripts/download_*.py)",
+   "notes": "AC3_labels.h5 is not produced by any nanoCosmos script and its provenance is undocumented locally; it is aligned with the image (membranes are darker under label 0). Section brightness flickers strongly (per-section mean 110..207): normalise per section before volume rendering.",
+   "voxel_size_zyx_nm": [
+    30.0,
+    6.0,
+    6.0
+   ],
+   "axis_order": "zyx",
+   "shape_zyx": [
+    100,
+    512,
+    512
+   ],
+   "physical_extent_zyx_nm": [
+    3000.0,
+    3072.0,
+    3072.0
+   ],
+   "anisotropy_z_over_x": 5.0,
+   "n_voxels": 26214400,
+   "source": {
+    "raw_path": "/home/nvidia/data/SNEMI3D/AC3_inputs.h5",
+    "raw_dataset": "main",
+    "label_path": "/home/nvidia/data/SNEMI3D/AC3_labels.h5",
+    "label_dataset": "main",
+    "offset_zyx": [
+     0,
+     320,
+     416
+    ],
+    "shape_zyx": [
+     100,
+     512,
+     512
+    ],
+    "full_shape_zyx": [
+     100,
+     1024,
+     1024
+    ],
+    "raw_dtype": "uint8",
+    "source_file_attrs": {}
+   },
+   "intensity": {
+    "norm_sidecar": "AC3_inputs.h5.norm.json",
+    "norm_min": 0.0,
+    "norm_max": 255.0,
+    "min": 0,
+    "max": 255,
+    "p01": 27.0,
+    "p50": 151.0,
+    "p99": 244.0,
+    "mean": 147.73172943115233,
+    "std": 47.95708561566353,
+    "outside_norm_fraction": 0.0,
+    "zero_fraction": 0.0006479644775390626,
+    "zero_block_fraction": 0.0,
+    "section_mean_min": 110.41993713378906,
+    "section_mean_max": 207.20260620117188,
+    "section_mean_std": 22.47522977851191,
+    "flagged_sections": []
+   },
+   "label_convention": "gapped",
+   "labels": {
+    "source_dtype": "uint16",
+    "dtype": "uint8",
+    "n_instances": 138,
+    "zero_fraction": 0.09653053283691407,
+    "id_order": "compact id 1 is the largest instance (descending voxel count, ties by ascending original id)",
+    "original_id_min": "3",
+    "original_id_max": "539",
+    "n_ge_10_voxels": 137,
+    "n_ge_100_voxels": 137,
+    "n_ge_1000_voxels": 135,
+    "n_ge_10000_voxels": 123,
+    "n_ge_100000_voxels": 55,
+    "voxel_share_of_100_largest": 0.8853290176391602,
+    "n_large_traversing": 17,
+    "traversers_ge_0p3pct_zyx": [
+     19,
+     9,
+     14
+    ],
+    "label_persistence_z_median": 0.85528564453125,
+    "label_persistence_z_min": 0.7721900939941406,
+    "largest_5": [
+     {
+      "id": 1,
+      "original_id": "3",
+      "voxels": 1958540,
+      "fraction_of_crop": 0.07471237182617188,
+      "volume_um3": 2.1152232,
+      "bbox_zyx": [
+       14,
+       0,
+       0,
+       100,
+       450,
+       512
+      ],
+      "bbox_extent_nm": [
+       2580.0,
+       2700.0,
+       3072.0
+      ],
+      "touches_opposite_faces": true,
+      "surface_exits": 8,
+      "connected_components": 3,
+      "largest_component_share": 0.9166348402381366,
+      "cable_length_um": 31.23533984375,
+      "branch_points": 18,
+      "end_points": 24,
+      "mean_radius_nm": 229.81971740722656,
+      "principal_axis_angle_to_z_deg": 60.630369549395624,
+      "elongation": 1.3490224334584737
+     },
+     {
+      "id": 2,
+      "original_id": "14",
+      "voxels": 1545120,
+      "fraction_of_crop": 0.058941650390625,
+      "volume_um3": 1.6687296,
+      "bbox_zyx": [
+       0,
+       0,
+       0,
+       100,
+       512,
+       512
+      ],
+      "bbox_extent_nm": [
+       3000.0,
+       3072.0,
+       3072.0
+      ],
+      "touches_opposite_faces": true,
+      "surface_exits": 9,
+      "connected_components": 1,
+      "largest_component_share": 1.0,
+      "cable_length_um": 21.51598828125,
+      "branch_points": 10,
+      "end_points": 12,
+      "mean_radius_nm": 155.9388427734375,
+      "principal_axis_angle_to_z_deg": 62.951120857375415,
+      "elongation": 3.4532998058623576
+     },
+     {
+      "id": 3,
+      "original_id": "16",
+      "voxels": 1102027,
+      "fraction_of_crop": 0.04203899383544922,
+      "volume_um3": 1.19018916,
+      "bbox_zyx": [
+       0,
+       0,
+       0,
+       100,
+       315,
+       431
+      ],
+      "bbox_extent_nm": [
+       3000.0,
+       1890.0,
+       2586.0
+      ],
+      "touches_opposite_faces": true,
+      "surface_exits": 3,
+      "connected_components": 1,
+      "largest_component_share": 1.0,
+      "cable_length_um": 16.620181640625,
+      "branch_points": 6,
+      "end_points": 8,
+      "mean_radius_nm": 124.09416198730469,
+      "principal_axis_angle_to_z_deg": 2.8872281180271013,
+      "elongation": 1.9695251003886973
+     },
+     {
+      "id": 4,
+      "original_id": "121",
+      "voxels": 933882,
+      "fraction_of_crop": 0.03562477111816406,
+      "volume_um3": 1.00859256,
+      "bbox_zyx": [
+       0,
+       183,
+       0,
+       63,
+       512,
+       185
+      ],
+      "bbox_extent_nm": [
+       1890.0,
+       1974.0,
+       1110.0
+      ],
+      "touches_opposite_faces": false,
+      "surface_exits": 1,
+      "connected_components": 1,
+      "largest_component_share": 1.0,
+      "cable_length_um": 4.93115087890625,
+      "branch_points": 1,
+      "end_points": 3,
+      "mean_radius_nm": 395.66119384765625,
+      "principal_axis_angle_to_z_deg": 59.579160400326835,
+      "elongation": 1.7666375199324686
+     },
+     {
+      "id": 5,
+      "original_id": "136",
+      "voxels": 915906,
+      "fraction_of_crop": 0.03493904113769531,
+      "volume_um3": 0.98917848,
+      "bbox_zyx": [
+       0,
+       42,
+       277,
+       61,
+       326,
+       512
+      ],
+      "bbox_extent_nm": [
+       1830.0,
+       1704.0,
+       1410.0
+      ],
+      "touches_opposite_faces": false,
+      "surface_exits": 3,
+      "connected_components": 1,
+      "largest_component_share": 1.0,
+      "cable_length_um": 12.78137109375,
+      "branch_points": 15,
+      "end_points": 17,
+      "mean_radius_nm": 175.6132049560547,
+      "principal_axis_angle_to_z_deg": 49.206291765360035,
+      "elongation": 1.0246637434948194
+     }
+    ],
+    "skeleton_subjects": [
+     {
+      "role": "runs across the sections (along z)",
+      "id": 10,
+      "original_id": "20",
+      "voxels": 818858,
+      "fraction_of_crop": 0.031236953735351562,
+      "volume_um3": 0.88436664,
+      "bbox_zyx": [
+       0,
+       217,
+       1,
+       100,
+       512,
+       384
+      ],
+      "bbox_extent_nm": [
+       3000.0,
+       1770.0,
+       2298.0
+      ],
+      "touches_opposite_faces": true,
+      "surface_exits": 5,
+      "connected_components": 1,
+      "largest_component_share": 1.0,
+      "cable_length_um": 15.5980009765625,
+      "branch_points": 8,
+      "end_points": 10,
+      "mean_radius_nm": 113.67866516113281,
+      "principal_axis_angle_to_z_deg": 16.361955602128905,
+      "elongation": 2.30964862735627
+     },
+     {
+      "role": "runs inside the section plane (xy)",
+      "id": 2,
+      "original_id": "14",
+      "voxels": 1545120,
+      "fraction_of_crop": 0.058941650390625,
+      "volume_um3": 1.6687296,
+      "bbox_zyx": [
+       0,
+       0,
+       0,
+       100,
+       512,
+       512
+      ],
+      "bbox_extent_nm": [
+       3000.0,
+       3072.0,
+       3072.0
+      ],
+      "touches_opposite_faces": true,
+      "surface_exits": 9,
+      "connected_components": 1,
+      "largest_component_share": 1.0,
+      "cable_length_um": 21.51598828125,
+      "branch_points": 10,
+      "end_points": 12,
+      "mean_radius_nm": 155.9388427734375,
+      "principal_axis_angle_to_z_deg": 62.951120857375415,
+      "elongation": 3.4532998058623576
+     },
+     {
+      "role": "most cable and branching of the rest",
+      "id": 5,
+      "original_id": "136",
+      "voxels": 915906,
+      "fraction_of_crop": 0.03493904113769531,
+      "volume_um3": 0.98917848,
+      "bbox_zyx": [
+       0,
+       42,
+       277,
+       61,
+       326,
+       512
+      ],
+      "bbox_extent_nm": [
+       1830.0,
+       1704.0,
+       1410.0
+      ],
+      "touches_opposite_faces": false,
+      "surface_exits": 3,
+      "connected_components": 1,
+      "largest_component_share": 1.0,
+      "cable_length_um": 12.78137109375,
+      "branch_points": 15,
+      "end_points": 17,
+      "mean_radius_nm": 175.6132049560547,
+      "principal_axis_angle_to_z_deg": 49.206291765360035,
+      "elongation": 1.0246637434948194
+     }
+    ]
+   },
+   "stored_bytes": {
+    "instance": 1385522,
+    "instance_bbox_zyx": 3336,
+    "instance_original_ids": 1112,
+    "instance_voxel_counts": 556,
+    "raw": 23857635
+   },
+   "chunks": {
+    "instance": [
+     16,
+     128,
+     128
+    ],
+    "instance_bbox_zyx": null,
+    "instance_original_ids": null,
+    "instance_voxel_counts": null,
+    "raw": [
+     16,
+     128,
+     128
+    ]
+   },
+   "bytes": 25276617,
+   "sha256": "e6ac71c6418055b1d599946e1dc10b5ff5602149c445d7777bb0b7dea901351f"
+  },
+  {
+   "name": "cremi_a",
+   "file": "cremi_a.h5",
+   "role": "core",
+   "dataset_name": "CREMI challenge (MICCAI 2016), sample A",
+   "species": "fruit fly (Drosophila melanogaster), adult",
+   "tissue": "brain",
+   "imaging_modality": "ssTEM",
+   "citation": "Funke, Saalfeld, Bock, Turaga, Perlman - CREMI Challenge, https://cremi.org/ ; FAFB: Zheng et al. 2018, Cell.",
+   "licence": "not stated in the local docs (nanoCosmos doc/DATASETS.md, scripts/download_*.py)",
+   "notes": "Ids tile space (no zeros). Thousands of ids are specks of a few voxels: ids are size-ordered, so keep ids <= N for the large neurites. Almost every neurite runs across the sections (along z).",
+   "voxel_size_zyx_nm": [
+    40.0,
+    4.0,
+    4.0
+   ],
+   "axis_order": "zyx",
+   "shape_zyx": [
+    75,
+    768,
+    768
+   ],
+   "physical_extent_zyx_nm": [
+    3000.0,
+    3072.0,
+    3072.0
+   ],
+   "anisotropy_z_over_x": 10.0,
+   "n_voxels": 44236800,
+   "source": {
+    "raw_path": "/home/nvidia/data/CREMI3D/cremi3d_sample_A_volume.h5",
+    "raw_dataset": "main",
+    "label_path": "/home/nvidia/data/CREMI3D/cremi3d_sample_A_segmentation.h5",
+    "label_dataset": "main",
+    "offset_zyx": [
+     45,
+     120,
+     120
+    ],
+    "shape_zyx": [
+     75,
+     768,
+     768
+    ],
+    "full_shape_zyx": [
+     125,
+     1250,
+     1250
+    ],
+    "raw_dtype": "uint8",
+    "source_file_attrs": {
+     "resolution_zyx_nm": [
+      40.0,
+      4.0,
+      4.0
+     ],
+     "source": "CREMI Challenge (https://cremi.org)"
+    }
+   },
+   "intensity": {
+    "norm_sidecar": "cremi3d_sample_A_volume.h5.norm.json",
+    "norm_min": 20.0,
+    "norm_max": 199.0,
+    "min": 3,
+    "max": 245,
+    "p01": 63.0,
+    "p50": 131.0,
+    "p99": 169.0,
+    "mean": 125.27460478606048,
+    "std": 29.127907932428485,
+    "outside_norm_fraction": 0.00012220594618055555,
+    "zero_fraction": 0.0,
+    "zero_block_fraction": 0.0,
+    "section_mean_min": 122.37565782335069,
+    "section_mean_max": 126.8507792154948,
+    "section_mean_std": 1.1430940754447418,
+    "flagged_sections": []
+   },
+   "label_convention": "filled",
+   "labels": {
+    "source_dtype": "int64",
+    "dtype": "uint16",
+    "n_instances": 9017,
+    "zero_fraction": 0.0,
+    "id_order": "compact id 1 is the largest instance (descending voxel count, ties by ascending original id)",
+    "original_id_min": "886",
+    "original_id_max": "191956",
+    "n_ge_10_voxels": 3373,
+    "n_ge_100_voxels": 940,
+    "n_ge_1000_voxels": 147,
+    "n_ge_10000_voxels": 127,
+    "n_ge_100000_voxels": 100,
+    "voxel_share_of_100_largest": 0.964799329969618,
+    "n_large_traversing": 38,
+    "traversers_ge_0p3pct_zyx": [
+     76,
+     2,
+     1
+    ],
+    "label_persistence_z_median": 0.8989876641167535,
+    "label_persistence_z_min": 0.8184543185763888,
+    "largest_5": [
+     {
+      "id": 1,
+      "original_id": "20474",
+      "voxels": 1601629,
+      "fraction_of_crop": 0.03620580602575232,
+      "volume_um3": 1.02504256,
+      "bbox_zyx": [
+       0,
+       0,
+       0,
+       75,
+       768,
+       768
+      ],
+      "bbox_extent_nm": [
+       3000.0,
+       3072.0,
+       3072.0
+      ],
+      "touches_opposite_faces": true,
+      "surface_exits": 52,
+      "connected_components": 60,
+      "largest_component_share": 0.9918788933017572,
+      "cable_length_um": 129.3890625,
+      "branch_points": 98,
+      "end_points": 112,
+      "mean_radius_nm": 30.515642166137695,
+      "principal_axis_angle_to_z_deg": 29.238550924977677,
+      "elongation": 1.252967326654563
+     },
+     {
+      "id": 2,
+      "original_id": "11715",
+      "voxels": 1054542,
+      "fraction_of_crop": 0.02383856879340278,
+      "volume_um3": 0.67490688,
+      "bbox_zyx": [
+       0,
+       79,
+       591,
+       75,
+       505,
+       768
+      ],
+      "bbox_extent_nm": [
+       3000.0,
+       1704.0,
+       708.0
+      ],
+      "touches_opposite_faces": true,
+      "surface_exits": 7,
+      "connected_components": 1,
+      "largest_component_share": 1.0,
+      "cable_length_um": 15.938775390625,
+      "branch_points": 12,
+      "end_points": 14,
+      "mean_radius_nm": 128.57679748535156,
+      "principal_axis_angle_to_z_deg": 2.0661046992398093,
+      "elongation": 2.1155225998555096
+     },
+     {
+      "id": 3,
+      "original_id": "4179",
+      "voxels": 889951,
+      "fraction_of_crop": 0.020117888274016203,
+      "volume_um3": 0.56956864,
+      "bbox_zyx": [
+       0,
+       153,
+       448,
+       75,
+       431,
+       695
+      ],
+      "bbox_extent_nm": [
+       3000.0,
+       1112.0,
+       988.0
+      ],
+      "touches_opposite_faces": true,
+      "surface_exits": 2,
+      "connected_components": 1,
+      "largest_component_share": 1.0,
+      "cable_length_um": 6.4825546875,
+      "branch_points": 3,
+      "end_points": 7,
+      "mean_radius_nm": 129.07887268066406,
+      "principal_axis_angle_to_z_deg": 12.311579792801005,
+      "elongation": 5.292637973744477
+     },
+     {
+      "id": 4,
+      "original_id": "36340",
+      "voxels": 820042,
+      "fraction_of_crop": 0.01853755244502315,
+      "volume_um3": 0.52482688,
+      "bbox_zyx": [
+       0,
+       470,
+       548,
+       75,
+       753,
+       768
+      ],
+      "bbox_extent_nm": [
+       3000.0,
+       1132.0,
+       880.0
+      ],
+      "touches_opposite_faces": true,
+      "surface_exits": 3,
+      "connected_components": 1,
+      "largest_component_share": 1.0,
+      "cable_length_um": 10.30335546875,
+      "branch_points": 7,
+      "end_points": 9,
+      "mean_radius_nm": 121.58834838867188,
+      "principal_axis_angle_to_z_deg": 12.130082001074037,
+      "elongation": 5.07166665975788
+     },
+     {
+      "id": 5,
+      "original_id": "30445",
+      "voxels": 736623,
+      "fraction_of_crop": 0.016651814778645833,
+      "volume_um3": 0.47143872,
+      "bbox_zyx": [
+       0,
+       0,
+       547,
+       33,
+       471,
+       768
+      ],
+      "bbox_extent_nm": [
+       1320.0,
+       1884.0,
+       884.0
+      ],
+      "touches_opposite_faces": false,
+      "surface_exits": 2,
+      "connected_components": 1,
+      "largest_component_share": 1.0,
+      "cable_length_um": 5.43841796875,
+      "branch_points": 2,
+      "end_points": 4,
+      "mean_radius_nm": 171.88482666015625,
+      "principal_axis_angle_to_z_deg": 70.43182023786194,
+      "elongation": 1.9006114278206698
+     }
+    ],
+    "skeleton_subjects": [
+     {
+      "role": "runs across the sections (along z)",
+      "id": 30,
+      "original_id": "5918",
+      "voxels": 503424,
+      "fraction_of_crop": 0.011380208333333334,
+      "volume_um3": 0.32219136,
+      "bbox_zyx": [
+       0,
+       0,
+       0,
+       75,
+       339,
+       187
+      ],
+      "bbox_extent_nm": [
+       3000.0,
+       1356.0,
+       748.0
+      ],
+      "touches_opposite_faces": true,
+      "surface_exits": 4,
+      "connected_components": 2,
+      "largest_component_share": 0.9999960272056954,
+      "cable_length_um": 18.2519140625,
+      "branch_points": 12,
+      "end_points": 14,
+      "mean_radius_nm": 58.623783111572266,
+      "principal_axis_angle_to_z_deg": 4.744942023413834,
+      "elongation": 3.183534891751239
+     },
+     {
+      "role": "runs inside the section plane (xy)",
+      "id": 5,
+      "original_id": "30445",
+      "voxels": 736623,
+      "fraction_of_crop": 0.016651814778645833,
+      "volume_um3": 0.47143872,
+      "bbox_zyx": [
+       0,
+       0,
+       547,
+       33,
+       471,
+       768
+      ],
+      "bbox_extent_nm": [
+       1320.0,
+       1884.0,
+       884.0
+      ],
+      "touches_opposite_faces": false,
+      "surface_exits": 2,
+      "connected_components": 1,
+      "largest_component_share": 1.0,
+      "cable_length_um": 5.43841796875,
+      "branch_points": 2,
+      "end_points": 4,
+      "mean_radius_nm": 171.88482666015625,
+      "principal_axis_angle_to_z_deg": 70.43182023786194,
+      "elongation": 1.9006114278206698
+     },
+     {
+      "role": "most cable and branching of the rest",
+      "id": 2,
+      "original_id": "11715",
+      "voxels": 1054542,
+      "fraction_of_crop": 0.02383856879340278,
+      "volume_um3": 0.67490688,
+      "bbox_zyx": [
+       0,
+       79,
+       591,
+       75,
+       505,
+       768
+      ],
+      "bbox_extent_nm": [
+       3000.0,
+       1704.0,
+       708.0
+      ],
+      "touches_opposite_faces": true,
+      "surface_exits": 7,
+      "connected_components": 1,
+      "largest_component_share": 1.0,
+      "cable_length_um": 15.938775390625,
+      "branch_points": 12,
+      "end_points": 14,
+      "mean_radius_nm": 128.57679748535156,
+      "principal_axis_angle_to_z_deg": 2.0661046992398093,
+      "elongation": 2.1155225998555096
+     }
+    ]
+   },
+   "stored_bytes": {
+    "instance": 2345952,
+    "instance_bbox_zyx": 216432,
+    "instance_original_ids": 72144,
+    "instance_voxel_counts": 36072,
+    "raw": 34669080
+   },
+   "chunks": {
+    "instance": [
+     16,
+     128,
+     128
+    ],
+    "instance_bbox_zyx": null,
+    "instance_original_ids": null,
+    "instance_voxel_counts": null,
+    "raw": [
+     16,
+     128,
+     128
+    ]
+   },
+   "bytes": 37380680,
+   "sha256": "1bc76b38dcc669dc4f118d76db080883ba696c52f86c7ee68bb5a39ba7ec3f51"
+  },
+  {
+   "name": "fib25",
+   "file": "fib25.h5",
+   "role": "core",
+   "dataset_name": "FlyEM FIB-25 (7-column medulla), dense core crop x2304 y2048 z6144",
+   "species": "fruit fly (Drosophila melanogaster)",
+   "tissue": "optic lobe, medulla",
+   "imaging_modality": "FIB-SEM",
+   "citation": "Takemura, S. et al. (2015), PNAS 112(44):13711-13716, doi:10.1073/pnas.1509820112.",
+   "licence": "not stated in the local docs (nanoCosmos doc/DATASETS.md, scripts/download_*.py)",
+   "notes": "Isotropic reference. raw[p::4] and instance[p::4] reproduce the 32x8x8 nm FIB253D twin exactly (see manifest 'derived'). The crop lies inside one 500-voxel block of the ground truth, so no label seam crosses it.",
+   "voxel_size_zyx_nm": [
+    8.0,
+    8.0,
+    8.0
+   ],
+   "axis_order": "zyx",
+   "shape_zyx": [
+    384,
+    384,
+    384
+   ],
+   "physical_extent_zyx_nm": [
+    3072.0,
+    3072.0,
+    3072.0
+   ],
+   "anisotropy_z_over_x": 1.0,
+   "n_voxels": 56623104,
+   "source": {
+    "raw_path": "/home/nvidia/data/FLYEM3D/flyem3d_8nm_x2304_y2048_z6144_volume.h5",
+    "raw_dataset": "main",
+    "label_path": "/home/nvidia/data/FLYEM3D/flyem3d_8nm_x2304_y2048_z6144_segmentation.h5",
+    "label_dataset": "main",
+    "offset_zyx": [
+     972,
+     180,
+     145
+    ],
+    "shape_zyx": [
+     384,
+     384,
+     384
+    ],
+    "full_shape_zyx": [
+     1536,
+     1536,
+     1536
+    ],
+    "raw_dtype": "uint8",
+    "source_file_attrs": {
+     "resolution_zyx_nm": [
+      8.0,
+      8.0,
+      8.0
+     ],
+     "source": "FlyEM FIB-25 (Takemura et al. 2015), gs://neuroglancer-public-data/flyem_fib-25"
+    }
+   },
+   "intensity": {
+    "norm_sidecar": "flyem3d_8nm_x2304_y2048_z6144_volume.h5.norm.json",
+    "norm_min": 32.0,
+    "norm_max": 218.0,
+    "min": 12,
+    "max": 212,
+    "p01": 63.0,
+    "p50": 129.0,
+    "p99": 190.0,
+    "mean": 128.44891037764373,
+    "std": 33.44753308885796,
+    "outside_norm_fraction": 1.3951902036313658e-05,
+    "zero_fraction": 0.0,
+    "zero_block_fraction": 0.0,
+    "section_mean_min": 121.60106743706598,
+    "section_mean_max": 135.42826334635416,
+    "section_mean_std": 3.0962459466242085,
+    "flagged_sections": []
+   },
+   "label_convention": "filled",
+   "labels": {
+    "source_dtype": "uint64",
+    "dtype": "uint16",
+    "n_instances": 768,
+    "zero_fraction": 0.0,
+    "id_order": "compact id 1 is the largest instance (descending voxel count, ties by ascending original id)",
+    "original_id_min": "146",
+    "original_id_max": "8928132",
+    "n_ge_10_voxels": 749,
+    "n_ge_100_voxels": 726,
+    "n_ge_1000_voxels": 516,
+    "n_ge_10000_voxels": 193,
+    "n_ge_100000_voxels": 59,
+    "voxel_share_of_100_largest": 0.9491614059165672,
+    "n_large_traversing": 21,
+    "traversers_ge_0p3pct_zyx": [
+     22,
+     19,
+     19
+    ],
+    "label_persistence_z_median": 0.9584079318576388,
+    "label_persistence_z_min": 0.8590087890625,
+    "largest_5": [
+     {
+      "id": 1,
+      "original_id": "30465",
+      "voxels": 5748095,
+      "fraction_of_crop": 0.10151501055117007,
+      "volume_um3": 2.94302464,
+      "bbox_zyx": [
+       0,
+       0,
+       86,
+       384,
+       384,
+       384
+      ],
+      "bbox_extent_nm": [
+       3072.0,
+       3072.0,
+       2384.0
+      ],
+      "touches_opposite_faces": true,
+      "surface_exits": 15,
+      "connected_components": 1,
+      "largest_component_share": 1.0,
+      "cable_length_um": 42.45405078125,
+      "branch_points": 39,
+      "end_points": 49,
+      "mean_radius_nm": 145.364501953125,
+      "principal_axis_angle_to_z_deg": 46.45728546531782,
+      "elongation": 1.384584693757367
+     },
+     {
+      "id": 2,
+      "original_id": "50809",
+      "voxels": 4182073,
+      "fraction_of_crop": 0.07385806684140805,
+      "volume_um3": 2.141221376,
+      "bbox_zyx": [
+       0,
+       0,
+       38,
+       264,
+       384,
+       384
+      ],
+      "bbox_extent_nm": [
+       2112.0,
+       3072.0,
+       2768.0
+      ],
+      "touches_opposite_faces": true,
+      "surface_exits": 20,
+      "connected_components": 7,
+      "largest_component_share": 0.7174420436945983,
+      "cable_length_um": 32.426884765625,
+      "branch_points": 28,
+      "end_points": 34,
+      "mean_radius_nm": 129.66439819335938,
+      "principal_axis_angle_to_z_deg": 79.49684879346593,
+      "elongation": 1.4034435890543135
+     },
+     {
+      "id": 3,
+      "original_id": "64129",
+      "voxels": 3924970,
+      "fraction_of_crop": 0.0693174644752785,
+      "volume_um3": 2.00958464,
+      "bbox_zyx": [
+       0,
+       0,
+       98,
+       381,
+       358,
+       384
+      ],
+      "bbox_extent_nm": [
+       3048.0,
+       2864.0,
+       2288.0
+      ],
+      "touches_opposite_faces": false,
+      "surface_exits": 16,
+      "connected_components": 9,
+      "largest_component_share": 0.9998738843863775,
+      "cable_length_um": 38.42079296875,
+      "branch_points": 31,
+      "end_points": 37,
+      "mean_radius_nm": 98.1816177368164,
+      "principal_axis_angle_to_z_deg": 54.57258213993065,
+      "elongation": 1.1405995257360402
+     },
+     {
+      "id": 4,
+      "original_id": "571372",
+      "voxels": 3244782,
+      "fraction_of_crop": 0.05730491214328342,
+      "volume_um3": 1.661328384,
+      "bbox_zyx": [
+       0,
+       0,
+       0,
+       384,
+       384,
+       384
+      ],
+      "bbox_extent_nm": [
+       3072.0,
+       3072.0,
+       3072.0
+      ],
+      "touches_opposite_faces": true,
+      "surface_exits": 30,
+      "connected_components": 11,
+      "largest_component_share": 0.8061536953792273,
+      "cable_length_um": 45.618671875,
+      "branch_points": 28,
+      "end_points": 38,
+      "mean_radius_nm": 83.20962524414062,
+      "principal_axis_angle_to_z_deg": 52.978641357657445,
+      "elongation": 1.3684127896883682
+     },
+     {
+      "id": 5,
+      "original_id": "547969",
+      "voxels": 2885656,
+      "fraction_of_crop": 0.05096251876265914,
+      "volume_um3": 1.477455872,
+      "bbox_zyx": [
+       0,
+       10,
+       0,
+       384,
+       384,
+       384
+      ],
+      "bbox_extent_nm": [
+       3072.0,
+       2992.0,
+       3072.0
+      ],
+      "touches_opposite_faces": true,
+      "surface_exits": 27,
+      "connected_components": 7,
+      "largest_component_share": 0.9858191690208397,
+      "cable_length_um": 46.4201484375,
+      "branch_points": 28,
+      "end_points": 34,
+      "mean_radius_nm": 79.54444885253906,
+      "principal_axis_angle_to_z_deg": 62.9111222804499,
+      "elongation": 1.2197667069668487
+     }
+    ],
+    "skeleton_subjects": [
+     {
+      "role": "runs across the sections (along z)",
+      "id": 25,
+      "original_id": "436484",
+      "voxels": 484734,
+      "fraction_of_crop": 0.00856071048312717,
+      "volume_um3": 0.248183808,
+      "bbox_zyx": [
+       0,
+       114,
+       0,
+       384,
+       360,
+       102
+      ],
+      "bbox_extent_nm": [
+       3072.0,
+       1968.0,
+       816.0
+      ],
+      "touches_opposite_faces": true,
+      "surface_exits": 19,
+      "connected_components": 10,
+      "largest_component_share": 0.9999030396052268,
+      "cable_length_um": 14.801162109375,
+      "branch_points": 13,
+      "end_points": 17,
+      "mean_radius_nm": 56.562034606933594,
+      "principal_axis_angle_to_z_deg": 9.896976605786103,
+      "elongation": 3.659069978681787
+     },
+     {
+      "role": "runs inside the section plane (xy)",
+      "id": 23,
+      "original_id": "21969",
+      "voxels": 587843,
+      "fraction_of_crop": 0.010381680947762949,
+      "volume_um3": 0.300975616,
+      "bbox_zyx": [
+       96,
+       68,
+       0,
+       299,
+       384,
+       384
+      ],
+      "bbox_extent_nm": [
+       1624.0,
+       2528.0,
+       3072.0
+      ],
+      "touches_opposite_faces": true,
+      "surface_exits": 9,
+      "connected_components": 7,
+      "largest_component_share": 0.9998588058376131,
+      "cable_length_um": 9.37728515625,
+      "branch_points": 4,
+      "end_points": 6,
+      "mean_radius_nm": 73.62046813964844,
+      "principal_axis_angle_to_z_deg": 69.9727382956658,
+      "elongation": 1.4018399042005862
+     },
+     {
+      "role": "most cable and branching of the rest",
+      "id": 10,
+      "original_id": "547880",
+      "voxels": 1766118,
+      "fraction_of_crop": 0.03119076622856988,
+      "volume_um3": 0.904252416,
+      "bbox_zyx": [
+       0,
+       0,
+       0,
+       384,
+       384,
+       384
+      ],
+      "bbox_extent_nm": [
+       3072.0,
+       3072.0,
+       3072.0
+      ],
+      "touches_opposite_faces": true,
+      "surface_exits": 28,
+      "connected_components": 13,
+      "largest_component_share": 0.997095324321478,
+      "cable_length_um": 26.362337890625,
+      "branch_points": 12,
+      "end_points": 14,
+      "mean_radius_nm": 80.86643981933594,
+      "principal_axis_angle_to_z_deg": 53.76252022686166,
+      "elongation": 1.3108745857253206
+     }
+    ]
+   },
+   "stored_bytes": {
+    "instance": 4289728,
+    "instance_bbox_zyx": 18456,
+    "instance_original_ids": 6152,
+    "instance_voxel_counts": 3076,
+    "raw": 47686926
+   },
+   "chunks": {
+    "instance": [
+     64,
+     64,
+     64
+    ],
+    "instance_bbox_zyx": null,
+    "instance_original_ids": null,
+    "instance_voxel_counts": null,
+    "raw": [
+     64,
+     64,
+     64
+    ]
+   },
+   "bytes": 52045338,
+   "sha256": "74d9fda3345e054b1780495a994e0aeecc5b4f9b1be02bc99a4ad0911ed90108"
+  },
+  {
+   "name": "flywire",
+   "file": "flywire.h5",
+   "role": "extra",
+   "dataset_name": "FlyWire FAFB, materialization v783 (EM mip 1, 8 nm; segmentation 16 nm nearest-upsampled 2x in xy)",
+   "species": "fruit fly (Drosophila melanogaster), adult female",
+   "tissue": "brain (FAFB)",
+   "imaging_modality": "ssTEM",
+   "citation": "FlyWire Consortium (2024), Whole-brain annotation and multi-connectome cell typing of Drosophila, Nature, doi:10.1038/s41586-024-07686-5; Dorkenwald et al. 2024, Nature.",
+   "licence": "not stated in the local docs (nanoCosmos doc/DATASETS.md, scripts/download_*.py)",
+   "notes": "Labels are 16 nm data upsampled 2x in xy, so label edges move in 2-voxel steps in plane.",
+   "voxel_size_zyx_nm": [
+    40.0,
+    8.0,
+    8.0
+   ],
+   "axis_order": "zyx",
+   "shape_zyx": [
+    75,
+    384,
+    384
+   ],
+   "physical_extent_zyx_nm": [
+    3000.0,
+    3072.0,
+    3072.0
+   ],
+   "anisotropy_z_over_x": 5.0,
+   "n_voxels": 11059200,
+   "source": {
+    "raw_path": "/home/nvidia/data/FLYWIRE/flywire_mip1_1024x1024x256_x88000_y20000_z3600_volume.h5",
+    "raw_dataset": "main",
+    "label_path": "/home/nvidia/data/FLYWIRE/flywire_mip1_1024x1024x256_x88000_y20000_z3600_m783_segmentation.h5",
+    "label_dataset": "main",
+    "offset_zyx": [
+     181,
+     160,
+     640
+    ],
+    "shape_zyx": [
+     75,
+     384,
+     384
+    ],
+    "full_shape_zyx": [
+     256,
+     1024,
+     1024
+    ],
+    "raw_dtype": "uint8",
+    "source_file_attrs": {
+     "resolution_zyx_nm": [
+      40.0,
+      8.0,
+      8.0
+     ],
+     "source": "FlyWire FAFB v783 (Dorkenwald et al. 2024); EM: gs://microns-seunglab/drosophila_v0/alignment/image_rechunked; Seg: gs://flywire_v141_m783"
+    }
+   },
+   "intensity": {
+    "norm_sidecar": "flywire_mip1_1024x1024x256_x88000_y20000_z3600_volume.h5.norm.json",
+    "norm_min": 3.0,
+    "norm_max": 249.0,
+    "min": 0,
+    "max": 254,
+    "p01": 67.0,
+    "p50": 129.0,
+    "p99": 187.0,
+    "mean": 129.67533157913772,
+    "std": 32.737441087365966,
+    "outside_norm_fraction": 1.9350405092592594e-05,
+    "zero_fraction": 9.223090277777778e-06,
+    "zero_block_fraction": 0.0,
+    "section_mean_min": 116.97987874348958,
+    "section_mean_max": 141.61087375217014,
+    "section_mean_std": 5.425638571949863,
+    "flagged_sections": []
+   },
+   "label_convention": "filled",
+   "labels": {
+    "source_dtype": "uint64",
+    "dtype": "uint16",
+    "n_instances": 620,
+    "zero_fraction": 0.0,
+    "id_order": "compact id 1 is the largest instance (descending voxel count, ties by ascending original id)",
+    "original_id_min": "720575940476936883",
+    "original_id_max": "720575940660196225",
+    "n_ge_10_voxels": 618,
+    "n_ge_100_voxels": 585,
+    "n_ge_1000_voxels": 486,
+    "n_ge_10000_voxels": 134,
+    "n_ge_100000_voxels": 27,
+    "voxel_share_of_100_largest": 0.8533843315972223,
+    "n_large_traversing": 22,
+    "traversers_ge_0p3pct_zyx": [
+     20,
+     16,
+     23
+    ],
+    "label_persistence_z_median": 0.8111572265625,
+    "label_persistence_z_min": 0.7340766059027778,
+    "largest_5": [
+     {
+      "id": 1,
+      "original_id": "720575940618865112",
+      "voxels": 687668,
+      "fraction_of_crop": 0.06218062789351852,
+      "volume_um3": 1.76043008,
+      "bbox_zyx": [
+       0,
+       0,
+       26,
+       75,
+       384,
+       374
+      ],
+      "bbox_extent_nm": [
+       3000.0,
+       3072.0,
+       2784.0
+      ],
+      "touches_opposite_faces": true,
+      "surface_exits": 9,
+      "connected_components": 5,
+      "largest_component_share": 0.9835676518319887,
+      "cable_length_um": 51.56763671875,
+      "branch_points": 45,
+      "end_points": 49,
+      "mean_radius_nm": 90.81201171875,
+      "principal_axis_angle_to_z_deg": 61.355195617897294,
+      "elongation": 2.4179407860018935
+     },
+     {
+      "id": 2,
+      "original_id": "720575940608059484",
+      "voxels": 584336,
+      "fraction_of_crop": 0.05283709490740741,
+      "volume_um3": 1.49590016,
+      "bbox_zyx": [
+       0,
+       0,
+       42,
+       75,
+       384,
+       384
+      ],
+      "bbox_extent_nm": [
+       3000.0,
+       3072.0,
+       2736.0
+      ],
+      "touches_opposite_faces": true,
+      "surface_exits": 8,
+      "connected_components": 1,
+      "largest_component_share": 1.0,
+      "cable_length_um": 33.26523046875,
+      "branch_points": 29,
+      "end_points": 31,
+      "mean_radius_nm": 114.53663635253906,
+      "principal_axis_angle_to_z_deg": 55.79576475298308,
+      "elongation": 2.141435566282233
+     },
+     {
+      "id": 3,
+      "original_id": "720575940630989354",
+      "voxels": 524740,
+      "fraction_of_crop": 0.04744827835648148,
+      "volume_um3": 1.3433344,
+      "bbox_zyx": [
+       0,
+       0,
+       0,
+       70,
+       326,
+       306
+      ],
+      "bbox_extent_nm": [
+       2800.0,
+       2608.0,
+       2448.0
+      ],
+      "touches_opposite_faces": false,
+      "surface_exits": 2,
+      "connected_components": 1,
+      "largest_component_share": 1.0,
+      "cable_length_um": 18.43855078125,
+      "branch_points": 12,
+      "end_points": 14,
+      "mean_radius_nm": 162.1112518310547,
+      "principal_axis_angle_to_z_deg": 45.12487508088099,
+      "elongation": 3.141210132237773
+     },
+     {
+      "id": 4,
+      "original_id": "720575940640445648",
+      "voxels": 446716,
+      "fraction_of_crop": 0.0403931568287037,
+      "volume_um3": 1.14359296,
+      "bbox_zyx": [
+       27,
+       0,
+       26,
+       75,
+       288,
+       384
+      ],
+      "bbox_extent_nm": [
+       1920.0,
+       2304.0,
+       2864.0
+      ],
+      "touches_opposite_faces": false,
+      "surface_exits": 5,
+      "connected_components": 2,
+      "largest_component_share": 0.9942334727209233,
+      "cable_length_um": 17.134794921875,
+      "branch_points": 8,
+      "end_points": 12,
+      "mean_radius_nm": 139.76963806152344,
+      "principal_axis_angle_to_z_deg": 66.5498049908181,
+      "elongation": 1.764287601134861
+     },
+     {
+      "id": 5,
+      "original_id": "720575940603464672",
+      "voxels": 443296,
+      "fraction_of_crop": 0.04008391203703704,
+      "volume_um3": 1.13483776,
+      "bbox_zyx": [
+       0,
+       94,
+       0,
+       75,
+       384,
+       308
+      ],
+      "bbox_extent_nm": [
+       3000.0,
+       2320.0,
+       2464.0
+      ],
+      "touches_opposite_faces": true,
+      "surface_exits": 3,
+      "connected_components": 2,
+      "largest_component_share": 0.9999909766837508,
+      "cable_length_um": 12.6358447265625,
+      "branch_points": 6,
+      "end_points": 10,
+      "mean_radius_nm": 160.21099853515625,
+      "principal_axis_angle_to_z_deg": 39.15825414099376,
+      "elongation": 2.881258897894861
+     }
+    ],
+    "skeleton_subjects": [
+     {
+      "role": "runs across the sections (along z)",
+      "id": 29,
+      "original_id": "720575940612321266",
+      "voxels": 96552,
+      "fraction_of_crop": 0.00873046875,
+      "volume_um3": 0.24717312,
+      "bbox_zyx": [
+       0,
+       166,
+       98,
+       75,
+       384,
+       260
+      ],
+      "bbox_extent_nm": [
+       3000.0,
+       1744.0,
+       1296.0
+      ],
+      "touches_opposite_faces": true,
+      "surface_exits": 3,
+      "connected_components": 1,
+      "largest_component_share": 1.0,
+      "cable_length_um": 9.90930078125,
+      "branch_points": 4,
+      "end_points": 6,
+      "mean_radius_nm": 71.36221313476562,
+      "principal_axis_angle_to_z_deg": 24.43137785019871,
+      "elongation": 3.0874461211326882
+     },
+     {
+      "role": "runs inside the section plane (xy)",
+      "id": 17,
+      "original_id": "720575940639892824",
+      "voxels": 171616,
+      "fraction_of_crop": 0.015517939814814814,
+      "volume_um3": 0.43933696,
+      "bbox_zyx": [
+       25,
+       156,
+       0,
+       60,
+       384,
+       218
+      ],
+      "bbox_extent_nm": [
+       1400.0,
+       1824.0,
+       1744.0
+      ],
+      "touches_opposite_faces": false,
+      "surface_exits": 3,
+      "connected_components": 1,
+      "largest_component_share": 1.0,
+      "cable_length_um": 11.0246328125,
+      "branch_points": 6,
+      "end_points": 8,
+      "mean_radius_nm": 94.86763000488281,
+      "principal_axis_angle_to_z_deg": 63.866365585260176,
+      "elongation": 1.7606218060460799
+     },
+     {
+      "role": "most cable and branching of the rest",
+      "id": 3,
+      "original_id": "720575940630989354",
+      "voxels": 524740,
+      "fraction_of_crop": 0.04744827835648148,
+      "volume_um3": 1.3433344,
+      "bbox_zyx": [
+       0,
+       0,
+       0,
+       70,
+       326,
+       306
+      ],
+      "bbox_extent_nm": [
+       2800.0,
+       2608.0,
+       2448.0
+      ],
+      "touches_opposite_faces": false,
+      "surface_exits": 2,
+      "connected_components": 1,
+      "largest_component_share": 1.0,
+      "cable_length_um": 18.43855078125,
+      "branch_points": 12,
+      "end_points": 14,
+      "mean_radius_nm": 162.1112518310547,
+      "principal_axis_angle_to_z_deg": 45.12487508088099,
+      "elongation": 3.141210132237773
+     }
+    ]
+   },
+   "stored_bytes": {
+    "instance": 593678,
+    "instance_bbox_zyx": 14904,
+    "instance_original_ids": 4968,
+    "instance_voxel_counts": 2484,
+    "raw": 9042110
+   },
+   "chunks": {
+    "instance": [
+     16,
+     128,
+     128
+    ],
+    "instance_bbox_zyx": null,
+    "instance_original_ids": null,
+    "instance_voxel_counts": null,
+    "raw": [
+     16,
+     128,
+     128
+    ]
+   },
+   "bytes": 9674056,
+   "sha256": "9c8e34972725319911d7024b7a2bc62005c8d1b60d5235b28edf43020368e383"
+  },
+  {
+   "name": "microns",
+   "file": "microns.h5",
+   "role": "extra",
+   "dataset_name": "MICrONS minnie65, EM mip 0, segmentation v1300",
+   "species": "mouse (Mus musculus)",
+   "tissue": "visual cortex (V1)",
+   "imaging_modality": "ssTEM",
+   "citation": "MICrONS Consortium (2025), Functional connectomics spanning multiple areas of mouse visual cortex, Nature (preprint bioRxiv 2021.07.28.454025).",
+   "licence": "not stated in the local docs (nanoCosmos doc/DATASETS.md, scripts/download_*.py)",
+   "notes": "Original ids are 18-digit uint64 root ids: keep them as integers or strings, never as float or JSON numbers. Low native contrast: display with the intensity_norm window. The source files carry no HDF5 attributes; the voxel size comes from the docs.",
+   "voxel_size_zyx_nm": [
+    40.0,
+    8.0,
+    8.0
+   ],
+   "axis_order": "zyx",
+   "shape_zyx": [
+    75,
+    384,
+    384
+   ],
+   "physical_extent_zyx_nm": [
+    3000.0,
+    3072.0,
+    3072.0
+   ],
+   "anisotropy_z_over_x": 5.0,
+   "n_voxels": 11059200,
+   "source": {
+    "raw_path": "/home/nvidia/data/MICRONS/minnie65_mip0_4096x4096x800_x80000_y70000_z16500_volume.h5",
+    "raw_dataset": "main",
+    "label_path": "/home/nvidia/data/MICRONS/minnie65_mip0_4096x4096x800_x80000_y70000_z16500_v1300_segmentation.h5",
+    "label_dataset": "main",
+    "offset_zyx": [
+     650,
+     300,
+     1000
+    ],
+    "shape_zyx": [
+     75,
+     384,
+     384
+    ],
+    "full_shape_zyx": [
+     800,
+     4096,
+     4096
+    ],
+    "raw_dtype": "uint8",
+    "source_file_attrs": {}
+   },
+   "intensity": {
+    "norm_sidecar": "minnie65_mip0_4096x4096x800_x80000_y70000_z16500_volume.h5.norm.json",
+    "norm_min": 56.0,
+    "norm_max": 180.0,
+    "min": 71,
+    "max": 180,
+    "p01": 108.0,
+    "p50": 127.0,
+    "p99": 150.0,
+    "mean": 127.30567364728009,
+    "std": 9.40075429693773,
+    "outside_norm_fraction": 0.0,
+    "zero_fraction": 0.0,
+    "zero_block_fraction": 0.0,
+    "section_mean_min": 123.50766330295139,
+    "section_mean_max": 132.88377549913196,
+    "section_mean_std": 1.827081808419418,
+    "flagged_sections": []
+   },
+   "label_convention": "filled",
+   "labels": {
+    "source_dtype": "uint64",
+    "dtype": "uint16",
+    "n_instances": 278,
+    "zero_fraction": 0.0009009693287037037,
+    "id_order": "compact id 1 is the largest instance (descending voxel count, ties by ascending original id)",
+    "original_id_min": "864691131944692785",
+    "original_id_max": "864691137197351745",
+    "n_ge_10_voxels": 270,
+    "n_ge_100_voxels": 265,
+    "n_ge_1000_voxels": 192,
+    "n_ge_10000_voxels": 124,
+    "n_ge_100000_voxels": 29,
+    "voxel_share_of_100_largest": 0.9406815140335648,
+    "n_large_traversing": 19,
+    "traversers_ge_0p3pct_zyx": [
+     12,
+     12,
+     12
+    ],
+    "label_persistence_z_median": 0.8409695095486112,
+    "label_persistence_z_min": 0.7473890516493056,
+    "largest_5": [
+     {
+      "id": 1,
+      "original_id": "864691135856291374",
+      "voxels": 824827,
+      "fraction_of_crop": 0.07458288122106481,
+      "volume_um3": 2.11155712,
+      "bbox_zyx": [
+       1,
+       0,
+       0,
+       75,
+       341,
+       384
+      ],
+      "bbox_extent_nm": [
+       2960.0,
+       2728.0,
+       3072.0
+      ],
+      "touches_opposite_faces": true,
+      "surface_exits": 9,
+      "connected_components": 2,
+      "largest_component_share": 0.5050792469208695,
+      "cable_length_um": 20.13241015625,
+      "branch_points": 9,
+      "end_points": 13,
+      "mean_radius_nm": 172.9671630859375,
+      "principal_axis_angle_to_z_deg": 58.39008226935784,
+      "elongation": 1.2850002294980187
+     },
+     {
+      "id": 2,
+      "original_id": "864691136091697076",
+      "voxels": 649283,
+      "fraction_of_crop": 0.05870976200810185,
+      "volume_um3": 1.66216448,
+      "bbox_zyx": [
+       0,
+       0,
+       0,
+       75,
+       384,
+       384
+      ],
+      "bbox_extent_nm": [
+       3000.0,
+       3072.0,
+       3072.0
+      ],
+      "touches_opposite_faces": true,
+      "surface_exits": 8,
+      "connected_components": 3,
+      "largest_component_share": 0.9643961107868217,
+      "cable_length_um": 22.75556640625,
+      "branch_points": 10,
+      "end_points": 14,
+      "mean_radius_nm": 138.083740234375,
+      "principal_axis_angle_to_z_deg": 80.96574754266831,
+      "elongation": 2.4154381783471046
+     },
+     {
+      "id": 3,
+      "original_id": "864691135773372923",
+      "voxels": 433340,
+      "fraction_of_crop": 0.03918366608796296,
+      "volume_um3": 1.1093504,
+      "bbox_zyx": [
+       0,
+       0,
+       0,
+       75,
+       384,
+       384
+      ],
+      "bbox_extent_nm": [
+       3000.0,
+       3072.0,
+       3072.0
+      ],
+      "touches_opposite_faces": true,
+      "surface_exits": 21,
+      "connected_components": 8,
+      "largest_component_share": 0.3784280241842433,
+      "cable_length_um": 47.53106640625,
+      "branch_points": 35,
+      "end_points": 48,
+      "mean_radius_nm": 67.02227783203125,
+      "principal_axis_angle_to_z_deg": 47.29828754705224,
+      "elongation": 1.4322030305449456
+     },
+     {
+      "id": 4,
+      "original_id": "864691135502744642",
+      "voxels": 368204,
+      "fraction_of_crop": 0.03329390914351852,
+      "volume_um3": 0.94260224,
+      "bbox_zyx": [
+       0,
+       92,
+       18,
+       75,
+       384,
+       384
+      ],
+      "bbox_extent_nm": [
+       3000.0,
+       2336.0,
+       2928.0
+      ],
+      "touches_opposite_faces": true,
+      "surface_exits": 5,
+      "connected_components": 2,
+      "largest_component_share": 0.9995464470782501,
+      "cable_length_um": 12.981783203125,
+      "branch_points": 7,
+      "end_points": 9,
+      "mean_radius_nm": 125.84574127197266,
+      "principal_axis_angle_to_z_deg": 18.540386681018436,
+      "elongation": 1.3191727240987021
+     },
+     {
+      "id": 5,
+      "original_id": "864691135066010948",
+      "voxels": 359212,
+      "fraction_of_crop": 0.03248083043981481,
+      "volume_um3": 0.91958272,
+      "bbox_zyx": [
+       0,
+       0,
+       0,
+       75,
+       384,
+       384
+      ],
+      "bbox_extent_nm": [
+       3000.0,
+       3072.0,
+       3072.0
+      ],
+      "touches_opposite_faces": true,
+      "surface_exits": 8,
+      "connected_components": 3,
+      "largest_component_share": 0.8596316381412648,
+      "cable_length_um": 18.885048828125,
+      "branch_points": 7,
+      "end_points": 11,
+      "mean_radius_nm": 104.30609130859375,
+      "principal_axis_angle_to_z_deg": 62.86548777805292,
+      "elongation": 2.1445596389084014
+     }
+    ],
+    "skeleton_subjects": [
+     {
+      "role": "runs across the sections (along z)",
+      "id": 31,
+      "original_id": "864691133729851062",
+      "voxels": 95945,
+      "fraction_of_crop": 0.008675582320601852,
+      "volume_um3": 0.2456192,
+      "bbox_zyx": [
+       39,
+       236,
+       0,
+       75,
+       384,
+       203
+      ],
+      "bbox_extent_nm": [
+       1440.0,
+       1184.0,
+       1624.0
+      ],
+      "touches_opposite_faces": false,
+      "surface_exits": 4,
+      "connected_components": 1,
+      "largest_component_share": 1.0,
+      "cable_length_um": 12.457802734375,
+      "branch_points": 12,
+      "end_points": 16,
+      "mean_radius_nm": 60.614200592041016,
+      "principal_axis_angle_to_z_deg": 27.839902654703504,
+      "elongation": 1.418973284660316
+     },
+     {
+      "role": "runs inside the section plane (xy)",
+      "id": 12,
+      "original_id": "864691135785967044",
+      "voxels": 253779,
+      "fraction_of_crop": 0.022947319878472223,
+      "volume_um3": 0.64967424,
+      "bbox_zyx": [
+       28,
+       62,
+       0,
+       75,
+       384,
+       384
+      ],
+      "bbox_extent_nm": [
+       1880.0,
+       2576.0,
+       3072.0
+      ],
+      "touches_opposite_faces": true,
+      "surface_exits": 5,
+      "connected_components": 1,
+      "largest_component_share": 1.0,
+      "cable_length_um": 14.768349609375,
+      "branch_points": 5,
+      "end_points": 7,
+      "mean_radius_nm": 103.48332977294922,
+      "principal_axis_angle_to_z_deg": 64.76570078740774,
+      "elongation": 1.351695249922049
+     },
+     {
+      "role": "most cable and branching of the rest",
+      "id": 4,
+      "original_id": "864691135502744642",
+      "voxels": 368204,
+      "fraction_of_crop": 0.03329390914351852,
+      "volume_um3": 0.94260224,
+      "bbox_zyx": [
+       0,
+       92,
+       18,
+       75,
+       384,
+       384
+      ],
+      "bbox_extent_nm": [
+       3000.0,
+       2336.0,
+       2928.0
+      ],
+      "touches_opposite_faces": true,
+      "surface_exits": 5,
+      "connected_components": 2,
+      "largest_component_share": 0.9995464470782501,
+      "cable_length_um": 12.981783203125,
+      "branch_points": 7,
+      "end_points": 9,
+      "mean_radius_nm": 125.84574127197266,
+      "principal_axis_angle_to_z_deg": 18.540386681018436,
+      "elongation": 1.3191727240987021
+     }
+    ]
+   },
+   "stored_bytes": {
+    "instance": 734100,
+    "instance_bbox_zyx": 6696,
+    "instance_original_ids": 2232,
+    "instance_voxel_counts": 1116,
+    "raw": 7075647
+   },
+   "chunks": {
+    "instance": [
+     16,
+     128,
+     128
+    ],
+    "instance_bbox_zyx": null,
+    "instance_original_ids": null,
+    "instance_voxel_counts": null,
+    "raw": [
+     16,
+     128,
+     128
+    ]
+   },
+   "bytes": 7835703,
+   "sha256": "5ee1142ce87c72a08a309dfd0ca320cecdbb4eca37c3467e1f448d17fa75366c"
+  },
+  {
+   "name": "h01",
+   "file": "h01.h5",
+   "role": "extra",
+   "dataset_name": "H01 release (human cortex), EM mip 0 (4 nm), c3 segmentation (8 nm nearest-upsampled 2x in xy)",
+   "species": "human (Homo sapiens)",
+   "tissue": "temporal cortex",
+   "imaging_modality": "ssSEM (ATUM tape collection + multibeam SEM, per the H01 paper; the local nanoCosmos docs say ssTEM)",
+   "citation": "Shapson-Coe et al. 2024, Science (A petavoxel fragment of human cerebral cortex reconstructed at nanoscale resolution).",
+   "licence": "CC-BY-4.0 (segmentation, as stated in scripts/download_h01cell.py); EM: not stated in the local docs (nanoCosmos doc/DATASETS.md, scripts/download_*.py)",
+   "notes": "Half-size field of view (about 1.5 um). Stain is saturated (many 0 and 255 voxels). About a quarter of the voxels are unlabelled.",
+   "voxel_size_zyx_nm": [
+    33.0,
+    4.0,
+    4.0
+   ],
+   "axis_order": "zyx",
+   "shape_zyx": [
+    47,
+    384,
+    384
+   ],
+   "physical_extent_zyx_nm": [
+    1551.0,
+    1536.0,
+    1536.0
+   ],
+   "anisotropy_z_over_x": 8.25,
+   "n_voxels": 6930432,
+   "source": {
+    "raw_path": "/home/nvidia/data/H01Cell/h01cell_mip0_1024x1024x5000_x560000_y200000_z0_volume.h5",
+    "raw_dataset": "main",
+    "label_path": "/home/nvidia/data/H01Cell/h01cell_mip0_1024x1024x5000_x560000_y200000_z0_c3_segmentation.h5",
+    "label_dataset": "main",
+    "offset_zyx": [
+     2046,
+     0,
+     480
+    ],
+    "shape_zyx": [
+     47,
+     384,
+     384
+    ],
+    "full_shape_zyx": [
+     5000,
+     1024,
+     1024
+    ],
+    "raw_dtype": "uint8",
+    "source_file_attrs": {
+     "resolution_zyx_nm": [
+      33.0,
+      4.0,
+      4.0
+     ],
+     "source": "H01 release (Shapson-Coe et al.); EM: gs://h01-release/data/20210601/4nm_raw; Seg: gs://h01-release/data/20210601/c3/ (CC-BY-4.0)"
+    }
+   },
+   "intensity": {
+    "norm_sidecar": "h01cell_mip0_1024x1024x5000_x560000_y200000_z0_volume.h5.norm.json",
+    "norm_min": 0.0,
+    "norm_max": 255.0,
+    "min": 0,
+    "max": 255,
+    "p01": 0.0,
+    "p50": 131.0,
+    "p99": 255.0,
+    "mean": 129.23116466621417,
+    "std": 71.58746929978712,
+    "outside_norm_fraction": 0.0,
+    "zero_fraction": 0.011930425116356383,
+    "zero_block_fraction": 0.0,
+    "section_mean_min": 123.78164333767361,
+    "section_mean_max": 133.91710747612848,
+    "section_mean_std": 2.5249199849306585,
+    "flagged_sections": []
+   },
+   "label_convention": "gapped",
+   "labels": {
+    "source_dtype": "uint64",
+    "dtype": "uint8",
+    "n_instances": 68,
+    "zero_fraction": 0.24633962211879432,
+    "id_order": "compact id 1 is the largest instance (descending voxel count, ties by ascending original id)",
+    "original_id_min": "19907164951",
+    "original_id_max": "37594189102",
+    "n_ge_10_voxels": 68,
+    "n_ge_100_voxels": 63,
+    "n_ge_1000_voxels": 57,
+    "n_ge_10000_voxels": 41,
+    "n_ge_100000_voxels": 15,
+    "voxel_share_of_100_largest": 0.7536603778812057,
+    "n_large_traversing": 16,
+    "traversers_ge_0p3pct_zyx": [
+     7,
+     11,
+     4
+    ],
+    "label_persistence_z_median": 0.8017985026041666,
+    "label_persistence_z_min": 0.6378309461805556,
+    "largest_5": [
+     {
+      "id": 1,
+      "original_id": "37550576465",
+      "voxels": 598784,
+      "fraction_of_crop": 0.086399231678487,
+      "volume_um3": 0.316157952,
+      "bbox_zyx": [
+       23,
+       0,
+       0,
+       47,
+       372,
+       384
+      ],
+      "bbox_extent_nm": [
+       792.0,
+       1488.0,
+       1536.0
+      ],
+      "touches_opposite_faces": true,
+      "surface_exits": 2,
+      "connected_components": 1,
+      "largest_component_share": 1.0,
+      "cable_length_um": 3.4622099609375,
+      "branch_points": 0,
+      "end_points": 2,
+      "mean_radius_nm": 153.5089111328125,
+      "principal_axis_angle_to_z_deg": 82.11763694339129,
+      "elongation": 2.327925773480343
+     },
+     {
+      "id": 2,
+      "original_id": "37579631928",
+      "voxels": 556880,
+      "fraction_of_crop": 0.08035285534869976,
+      "volume_um3": 0.29403264,
+      "bbox_zyx": [
+       4,
+       0,
+       224,
+       47,
+       384,
+       384
+      ],
+      "bbox_extent_nm": [
+       1419.0,
+       1536.0,
+       640.0
+      ],
+      "touches_opposite_faces": true,
+      "surface_exits": 3,
+      "connected_components": 1,
+      "largest_component_share": 1.0,
+      "cable_length_um": 3.094222412109375,
+      "branch_points": 0,
+      "end_points": 2,
+      "mean_radius_nm": 145.05584716796875,
+      "principal_axis_angle_to_z_deg": 46.90084491601649,
+      "elongation": 2.5162087379286486
+     },
+     {
+      "id": 3,
+      "original_id": "37550503374",
+      "voxels": 349412,
+      "fraction_of_crop": 0.05041705913859338,
+      "volume_um3": 0.184489536,
+      "bbox_zyx": [
+       0,
+       0,
+       8,
+       27,
+       384,
+       228
+      ],
+      "bbox_extent_nm": [
+       891.0,
+       1536.0,
+       880.0
+      ],
+      "touches_opposite_faces": true,
+      "surface_exits": 3,
+      "connected_components": 1,
+      "largest_component_share": 1.0,
+      "cable_length_um": 2.89333447265625,
+      "branch_points": 0,
+      "end_points": 2,
+      "mean_radius_nm": 127.4435043334961,
+      "principal_axis_angle_to_z_deg": 68.54506783527106,
+      "elongation": 2.404919476476092
+     },
+     {
+      "id": 4,
+      "original_id": "37565089627",
+      "voxels": 324136,
+      "fraction_of_crop": 0.046769956043144205,
+      "volume_um3": 0.171143808,
+      "bbox_zyx": [
+       0,
+       28,
+       200,
+       47,
+       384,
+       384
+      ],
+      "bbox_extent_nm": [
+       1551.0,
+       1424.0,
+       736.0
+      ],
+      "touches_opposite_faces": true,
+      "surface_exits": 5,
+      "connected_components": 1,
+      "largest_component_share": 1.0,
+      "cable_length_um": 5.7246142578125,
+      "branch_points": 2,
+      "end_points": 4,
+      "mean_radius_nm": 92.35142517089844,
+      "principal_axis_angle_to_z_deg": 7.262270435411686,
+      "elongation": 1.3028959666255195
+     },
+     {
+      "id": 5,
+      "original_id": "37594188831",
+      "voxels": 295640,
+      "fraction_of_crop": 0.042658235446217496,
+      "volume_um3": 0.15609792,
+      "bbox_zyx": [
+       0,
+       0,
+       84,
+       47,
+       308,
+       236
+      ],
+      "bbox_extent_nm": [
+       1551.0,
+       1232.0,
+       608.0
+      ],
+      "touches_opposite_faces": true,
+      "surface_exits": 2,
+      "connected_components": 1,
+      "largest_component_share": 1.0,
+      "cable_length_um": 3.01094580078125,
+      "branch_points": 1,
+      "end_points": 3,
+      "mean_radius_nm": 121.36558532714844,
+      "principal_axis_angle_to_z_deg": 32.856798415057526,
+      "elongation": 3.9286080220822384
+     }
+    ],
+    "skeleton_subjects": [
+     {
+      "role": "runs across the sections (along z)",
+      "id": 6,
+      "original_id": "37565074952",
+      "voxels": 268888,
+      "fraction_of_crop": 0.03879815861406619,
+      "volume_um3": 0.141972864,
+      "bbox_zyx": [
+       0,
+       0,
+       132,
+       47,
+       384,
+       384
+      ],
+      "bbox_extent_nm": [
+       1551.0,
+       1536.0,
+       1008.0
+      ],
+      "touches_opposite_faces": true,
+      "surface_exits": 3,
+      "connected_components": 1,
+      "largest_component_share": 1.0,
+      "cable_length_um": 6.4543681640625,
+      "branch_points": 2,
+      "end_points": 4,
+      "mean_radius_nm": 121.73686981201172,
+      "principal_axis_angle_to_z_deg": 20.64738293828275,
+      "elongation": 1.5149489256003885
+     },
+     {
+      "role": "runs inside the section plane (xy)",
+      "id": 7,
+      "original_id": "37579631830",
+      "voxels": 243852,
+      "fraction_of_crop": 0.03518568539450355,
+      "volume_um3": 0.128753856,
+      "bbox_zyx": [
+       5,
+       0,
+       8,
+       22,
+       384,
+       384
+      ],
+      "bbox_extent_nm": [
+       561.0,
+       1536.0,
+       1504.0
+      ],
+      "touches_opposite_faces": true,
+      "surface_exits": 4,
+      "connected_components": 1,
+      "largest_component_share": 1.0,
+      "cable_length_um": 4.5642099609375,
+      "branch_points": 1,
+      "end_points": 3,
+      "mean_radius_nm": 76.57949829101562,
+      "principal_axis_angle_to_z_deg": 86.29664258807692,
+      "elongation": 1.1946259448283578
+     },
+     {
+      "role": "most cable and branching of the rest",
+      "id": 4,
+      "original_id": "37565089627",
+      "voxels": 324136,
+      "fraction_of_crop": 0.046769956043144205,
+      "volume_um3": 0.171143808,
+      "bbox_zyx": [
+       0,
+       28,
+       200,
+       47,
+       384,
+       384
+      ],
+      "bbox_extent_nm": [
+       1551.0,
+       1424.0,
+       736.0
+      ],
+      "touches_opposite_faces": true,
+      "surface_exits": 5,
+      "connected_components": 1,
+      "largest_component_share": 1.0,
+      "cable_length_um": 5.7246142578125,
+      "branch_points": 2,
+      "end_points": 4,
+      "mean_radius_nm": 92.35142517089844,
+      "principal_axis_angle_to_z_deg": 7.262270435411686,
+      "elongation": 1.3028959666255195
+     }
+    ]
+   },
+   "stored_bytes": {
+    "instance": 200086,
+    "instance_bbox_zyx": 1656,
+    "instance_original_ids": 552,
+    "instance_voxel_counts": 276,
+    "raw": 6901677
+   },
+   "chunks": {
+    "instance": [
+     16,
+     128,
+     128
+    ],
+    "instance_bbox_zyx": null,
+    "instance_original_ids": null,
+    "instance_voxel_counts": null,
+    "raw": [
+     16,
+     128,
+     128
+    ]
+   },
+   "bytes": 7122735,
+   "sha256": "480ef100c31c156859222884c5ed847778d8fe25d60b783edbe7a4378a7c99f3"
+  },
+  {
+   "name": "mitoem2_podo",
+   "file": "mitoem2_podo.h5",
+   "role": "extra",
+   "dataset_name": "MitoEM 2.0 v6, Dataset005_ME2-Podo, train01 (image only; mitochondria labels are not on disk)",
+   "species": "mouse (Mus musculus)",
+   "tissue": "kidney (glomerulus), podocyte",
+   "imaging_modality": "FIB-SEM",
+   "citation": "Liu, P. (2026), MitoEM 2.0 v6, Zenodo, doi:10.5281/zenodo.20417683; source data doi:10.1038/s41586-021-03977-3 (MitoEM2 metadata.csv).",
+   "licence": "CC-BY-4.0 (MitoEM2 metadata.csv)",
+   "notes": "Isotropic but coarse: the same 3 um cube needs only 192^3 voxels.",
+   "voxel_size_zyx_nm": [
+    16.0,
+    16.0,
+    16.0
+   ],
+   "axis_order": "zyx",
+   "shape_zyx": [
+    192,
+    192,
+    192
+   ],
+   "physical_extent_zyx_nm": [
+    3072.0,
+    3072.0,
+    3072.0
+   ],
+   "anisotropy_z_over_x": 1.0,
+   "n_voxels": 7077888,
+   "source": {
+    "raw_path": "/home/nvidia/data/MitoEM2/mitoem2_podo_train01_volume.h5",
+    "raw_dataset": "main",
+    "label_path": null,
+    "label_dataset": null,
+    "offset_zyx": [
+     0,
+     576,
+     480
+    ],
+    "shape_zyx": [
+     192,
+     192,
+     192
+    ],
+    "full_shape_zyx": [
+     256,
+     1024,
+     1024
+    ],
+    "raw_dtype": "uint8",
+    "source_file_attrs": {}
+   },
+   "intensity": {
+    "norm_sidecar": "mitoem2_podo_train01_volume.h5.norm.json",
+    "norm_min": 0.0,
+    "norm_max": 194.0,
+    "min": 0,
+    "max": 193,
+    "p01": 30.0,
+    "p50": 137.0,
+    "p99": 178.0,
+    "mean": 131.80961298059535,
+    "std": 29.10879099578995,
+    "outside_norm_fraction": 0.0,
+    "zero_fraction": 0.0002721150716145833,
+    "zero_block_fraction": 0.0,
+    "section_mean_min": 124.80232747395833,
+    "section_mean_max": 138.593017578125,
+    "section_mean_std": 3.7519363883500274,
+    "flagged_sections": []
+   },
+   "label_convention": "none",
+   "stored_bytes": {
+    "raw": 5685083
+   },
+   "chunks": {
+    "raw": [
+     64,
+     64,
+     64
+    ]
+   },
+   "bytes": 5696379,
+   "sha256": "a371b048f4e099fdd9fc2363eecc516c9b240532dadcac6424f976ae50b0ce5b"
+  },
+  {
+   "name": "cosem_hela3",
+   "file": "cosem_hela3.h5",
+   "role": "extra",
+   "dataset_name": "OpenOrganelle / COSEM jrc_hela-3 (image only), crop x6144 y0 z0",
+   "species": "human (Homo sapiens), HeLa cell line",
+   "tissue": "cultured cell",
+   "imaging_modality": "FIB-SEM",
+   "citation": "Xu et al. 2021, Nature; Heinrich et al. 2021, Nature.",
+   "licence": "not stated in the local docs (nanoCosmos doc/DATASETS.md, scripts/download_*.py)",
+   "notes": "Quarter-size field of view (0.768 um; the full 3.07 um cube would need 768^3 = 453 M voxels). On disk the z axis was resampled 3.24 -> 4 nm (trilinear) by nanoCosmos resample_cosem_isotropic.py, so 4 nm in z is a resampled grid, not the native sampling.",
+   "voxel_size_zyx_nm": [
+    4.0,
+    4.0,
+    4.0
+   ],
+   "axis_order": "zyx",
+   "shape_zyx": [
+    192,
+    192,
+    192
+   ],
+   "physical_extent_zyx_nm": [
+    768.0,
+    768.0,
+    768.0
+   ],
+   "anisotropy_z_over_x": 1.0,
+   "n_voxels": 7077888,
+   "source": {
+    "raw_path": "/home/nvidia/data/COSEM3D/jrc_hela-3_4nm_x6144_y0_z0_volume.h5",
+    "raw_dataset": "main",
+    "label_path": null,
+    "label_dataset": null,
+    "offset_zyx": [
+     1056,
+     528,
+     1312
+    ],
+    "shape_zyx": [
+     192,
+     192,
+     192
+    ],
+    "full_shape_zyx": [
+     1659,
+     1000,
+     2048
+    ],
+    "raw_dtype": "uint8",
+    "source_file_attrs": {
+     "resolution_zyx_nm": [
+      4.0,
+      4.0,
+      4.0
+     ],
+     "source": "OpenOrganelle / COSEM jrc_hela-3 (s3://janelia-cosem-datasets/jrc_hela-3); image-only, SSL branch. Auto-selected via collect_meaningful_crops.py (content_frac=0.94, autocorr=0.75). Resampled 3.24->4 nm cubic (z-only, trilinear) via resample_cosem_isotropic.py from jrc_hela-3_4x4x3.24nm_x6144_y0_z0_volume.h5."
+    }
+   },
+   "intensity": {
+    "norm_sidecar": "jrc_hela-3_4nm_x6144_y0_z0_volume.h5.norm.json",
+    "norm_min": 0.0,
+    "norm_max": 255.0,
+    "min": 0,
+    "max": 255,
+    "p01": 18.0,
+    "p50": 168.0,
+    "p99": 248.0,
+    "mean": 160.84111249005352,
+    "std": 50.9609447374179,
+    "outside_norm_fraction": 0.0,
+    "zero_fraction": 0.0012457105848524305,
+    "zero_block_fraction": 0.0,
+    "section_mean_min": 150.94200303819446,
+    "section_mean_max": 169.67125108506946,
+    "section_mean_std": 4.901969817162154,
+    "flagged_sections": []
+   },
+   "label_convention": "none",
+   "stored_bytes": {
+    "raw": 6732562
+   },
+   "chunks": {
+    "raw": [
+     64,
+     64,
+     64
+    ]
+   },
+   "bytes": 6743858,
+   "sha256": "a91befc1ca0b9cfe4ee8ac36952817ec2bfcb623b9cee65c230b59a6779cd56d"
+  }
+ ],
+ "derived": [
+  {
+   "name": "fib25_z32",
+   "derived_from": "fib25",
+   "voxel_size_zyx_nm": [
+    32.0,
+    8.0,
+    8.0
+   ],
+   "shape_zyx": [
+    96,
+    384,
+    384
+   ],
+   "stored": false,
+   "recipe": "raw[p::4] and instance[p::4] for a phase p in 0..3 (keep one 8 nm plane out of four; labels must be strided, never averaged)",
+   "verified_equal_to": "FIB253D/fib253d_z32xy8nm_p{p}_x2304_y2048_z6144_{volume,segmentation}.h5 main[243:339, 180:564, 145:529] for p = 0, 1, 2, 3",
+   "alternative": "slab mean of the image, raw.reshape(96, 4, 384, 384).mean(1): models a section that integrates over its thickness; not what FIB253D stores"
+  }
+ ],
+ "checksum_note": "sha256 values are of the files shipped in this folder. scripts/make_samples.py reproduces the same arrays and attributes; the compressed bytes are identical only when the HDF5 library version is the same (shipped files: h5py 3.16.0, HDF5 2.0.0)."
+}
