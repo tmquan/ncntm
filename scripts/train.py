@@ -2,7 +2,7 @@
 """
 ncntm pretraining entry point.
 
-Loads a Hydra config, builds the joint datamodule + Cosmos3-Edge Lightning
+Loads a Hydra config, builds the joint datamodule + VoxelDiT2-3D Lightning
 module + trainer, then calls ``trainer.fit(...)``.
 
 Examples
@@ -48,7 +48,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 def _prefer_bundled_cudnn() -> None:
     """Re-exec so the cuDNN shipped with the torch wheel wins over
-    ``/usr/local/cuda/lib64`` (a mismatched cuDNN fails the first Wan VAE
+    ``/usr/local/cuda/lib64`` (a mismatched cuDNN fails the first
     ``conv3d`` with ``CUDNN_STATUS_SUBLIBRARY_LOADING_FAILED``).  glibc reads
     ``LD_LIBRARY_PATH`` only at process start."""
     lib = (
@@ -196,13 +196,13 @@ def build_datamodule(cfg: DictConfig) -> pl.LightningDataModule:
 
 
 def build_module(cfg: DictConfig) -> pl.LightningModule:
-    from ncntm.modules import JointEdge3DModule
+    from ncntm.modules import JointVoxelDiT3DModule
 
     model_cfg = dict(cfg.get("model", {}))
     model_cfg.pop("type", None)
     loss_cfg = dict(cfg.get("loss", {}))
     loss_cfg.pop("type", None)
-    return JointEdge3DModule(
+    return JointVoxelDiT3DModule(
         model_config=model_cfg,
         optimizer_config=dict(cfg.get("optimizer", {})),
         loss_config=loss_cfg,
@@ -432,7 +432,7 @@ def _write_run_provenance(run_dir: Path) -> None:
 def main(cfg: DictConfig) -> None:
     _install_runtime_patches()
 
-    console.rule("ncntm - Cosmos3-Edge pretraining")
+    console.rule("ncntm - VoxelDiT2-3D pretraining")
     console.print(OmegaConf.to_yaml(cfg))
 
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")

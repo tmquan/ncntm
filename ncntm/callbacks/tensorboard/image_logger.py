@@ -48,7 +48,7 @@ class ImageLogger(pl.Callback):
         {stage}/automatic/true/image
         {stage}/automatic/true/label
         {stage}/automatic/true/sem                              (sem target)
-        {stage}/automatic/true/wan_decoder                      (Cosmos + VAE only)
+        {stage}/automatic/true/wan_decoder                      (VAE-based backbones only)
         {stage}/automatic/pred/sem
         {stage}/automatic/pred/raw
         {stage}/automatic/pred/label/pre                        (Mutex Watershed, 3-D)
@@ -137,7 +137,7 @@ class ImageLogger(pl.Callback):
         Mirrors the dtype the model actually computes in so the panels
         match training:
 
-        1. the backbone's own ``model._dtype`` (Cosmos wrappers set this to
+        1. the backbone's own ``model._dtype`` (the wrapper sets this to
            bf16/fp16/fp32), else
         2. the trainer's mixed-precision setting (``bf16-mixed`` -> bf16,
            ``16-mixed`` -> fp16), else
@@ -243,8 +243,8 @@ class ImageLogger(pl.Callback):
         device_type = str(pl_module.device).split(":")[0]
         autocast_enabled = device_type == "cuda"
         # Match the backbone's compute dtype.  ``torch.amp.autocast`` defaults
-        # to *float16* on CUDA, but the Cosmos backbone runs (and trains, under
-        # ``bf16-mixed``) in bf16: its VAE/DiT activations routinely exceed
+        # to *float16* on CUDA, but the backbone runs (and trains, under
+        # ``bf16-mixed``) in bf16: its activations routinely exceed
         # fp16's ~65504 range, so an fp16 autocast here overflows them to
         # Inf -> NaN and every model-derived panel (pred/*, aff/pred/*,
         # true/wan_decoder) renders all-black while the data-derived GT panels
@@ -278,7 +278,7 @@ class ImageLogger(pl.Callback):
                 [fwd_module(images[i:i + 1]) for i in range(n)], dim=0,
             )
 
-            # Wan-VAE reconstruction panel (Cosmos diagnostic) is a wrapper
+            # Wan-VAE reconstruction panel (VAE-based backbones only) is a wrapper
             # METHOD, not the forward, so it can't ride the root unshard --
             # under FSDP its params would be sharded.  Skip it under FSDP
             # (panel suppressed); keep it on DDP / single where params are

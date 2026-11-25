@@ -20,12 +20,14 @@ The modules, in the order of a notebook
     usd_to_emray   build_scene(stage): draw that stage with the ray caster   [imports pxr and warp]
     emray          Scene, Camera: the Warp ray caster (CUDA or CPU)           [imports warp]
     figure         montage, side_by_side, caption, scale_bar, show           [imports Pillow]
+    view           render(stage): one picture, by RTX where Isaac Sim can draw, else by the
+                   ray caster; compare_backends                [imports the above when used]
 
 ``import ncntm.viz`` loads numpy and nothing else: the names of ``__all__`` (samples, grid,
 convert, types).  The other modules, and the names of theirs listed in ``LAZY`` (Scene,
 Camera, Dataset, new_stage, save_stage, find_datasets, build_scene, default_camera,
-camera_from_stage, montage, side_by_side, caption, scale_bar, show, start_kit), are imported
-the first time they are used:
+camera_from_stage, montage, side_by_side, caption, scale_bar, show, start_kit, render,
+compare_backends), are imported the first time they are used:
 
     import ncntm.viz as viz
     sample = viz.load_sample("snemi3d")                  # numpy, h5py
@@ -55,7 +57,7 @@ __all__ = [
     "single_gaussian", "voxel_gaussian", "gaussians_wrong_ways", "measure", "mean_radius_nm", "compare_anisotropy",
 ]
 
-MODULES = ("grid", "types", "samples", "convert", "kit", "stage", "usd_to_emray", "emray", "figure")
+MODULES = ("grid", "types", "samples", "convert", "kit", "stage", "usd_to_emray", "emray", "figure", "view")
 
 # name -> module that defines it; that module is imported when the name is first used
 LAZY = {
@@ -64,6 +66,7 @@ LAZY = {
     "build_scene": "usd_to_emray", "default_camera": "usd_to_emray", "camera_from_stage": "usd_to_emray",
     "montage": "figure", "side_by_side": "figure", "caption": "figure", "scale_bar": "figure", "show": "figure",
     "start_kit": "kit",
+    "render": "view", "compare_backends": "view",
 }
 
 

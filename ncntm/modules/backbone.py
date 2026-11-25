@@ -1,23 +1,16 @@
 """
-Cosmos 3 Lightning-module base for 3-D volumetric segmentation.
+Lightning-module base for 3-D volumetric backbones.
 
-Specialisation of :class:`~ncntm.modules.base.BaseCircuitModule`
-for the Cosmos 3 backbones (Nano, Edge, Super).  The base
-``BaseCircuitModule`` owns training, evaluation and logging;
-this module adds:
+Specialisation of :class:`~ncntm.modules.base.BaseCircuitModule` for the
+VoxelDiT2-3D backbone.  The base ``BaseCircuitModule`` owns training,
+evaluation and logging; this module adds:
 
 * HuggingFace token handling (kept out of ``save_hyperparameters``)
-* freeze flags forwarded to the wrapper at construction
-  (``freeze_vae_encoder``, ``freeze_vae_decoder``,
-  ``freeze_dit_backbone``, ``freeze_understanding_stream``,
-  ``freeze_understanding_ffn``). An integer
-  ``freeze_dit_backbone`` is a warm-up thawed in
-  :meth:`on_train_epoch_start`. ``freeze_vae_decoder`` freezes the
-  whole decoder body, including the last up-block and output norm, and
-  the decode stays on the loss path into the DiT
+* an integer ``freeze_dit_backbone`` warm-up, thawed in
+  :meth:`on_train_epoch_start`
 * fused-norm NaN/Inf gradient guard (one device->host sync per step
   via :func:`torch._foreach_norm` rather than one per parameter --
-  see :meth:`BaseCosmosModule.configure_gradient_clipping`)
+  see :meth:`BackboneModule.configure_gradient_clipping`)
 * backbone-specific AdamW learning rate and param-group split
   (``model.dit.*`` at ``dit_backbone_lr`` vs everything else at ``lr``)
   in :meth:`configure_optimizers`; empty groups are filtered out
@@ -26,9 +19,8 @@ this module adds:
 Only the **automatic** training mode is supported (the volume is the
 only input).
 
-Subclasses with architecture-specific model kwargs override
-:meth:`_extra_model_kwargs` to add them; the base ``_build_model`` only
-forwards the kwargs the shared ``_BaseCosmos25Wrapper`` accepts.
+Subclasses define :attr:`_model_cls` / :attr:`_loss_cls` and implement
+:meth:`_build_model`.
 """
 
 import logging
@@ -46,7 +38,7 @@ from ncntm.optim.master_adamw import MasterAdamW, master_dtype_from_config
 logger = logging.getLogger(__name__)
 
 # Log level for the per-step non-finite-gradient guard in
-# ``BaseCosmosModule.configure_gradient_clipping``.  Default DEBUG keeps
+# ``BackboneModule.configure_gradient_clipping``.  Default DEBUG keeps
 # it silent under the usual INFO/WARNING root logger. bf16-true with
 # ``gradient_clip_val=1.0`` can still trip the guard, and a raised level
 # emits one line per DDP rank. Override via
@@ -59,14 +51,14 @@ _GRAD_GUARD_LOG_FN = getattr(
 )
 
 
-class BaseCosmosModule(BaseCircuitModule):
-    """Lightning base for the Cosmos 3 tiers (Nano, Edge, Super).
+class BackboneModule(BaseCircuitModule):
+    """Lightning base for the VoxelDiT2-3D backbone.
 
     Subclasses **must** define :attr:`_model_cls` and :attr:`_loss_cls`.
 
     Args:
         model_config: Forwarded to ``_model_cls`` (see
-            :class:`ncntm.models.cosmos_2_5_common.wrapper_base._BaseCosmos25Wrapper`).
+            :class:`ncntm.models.voxeldit2.VoxelDiT2Wrapper3D`).
         optimizer_config: Optimizer / scheduler settings.
         loss_config: Forwarded as ``**loss_config`` to ``_loss_cls``.
         training_config: Training behaviour (mutex_watershed, freeze schedule, ...).
@@ -112,53 +104,10 @@ class BaseCosmosModule(BaseCircuitModule):
             **kwargs,
         )
 
-        if self.model._backbone_loaded and self.model.vae_encoder is not None:
-            self.model._fallback_down.requires_grad_(False)
-
         logger.info(
             "Validation agglomerator: %s",
             repr(self.agglomerator),
         )
-
-    def _build_model(self, model_config: Dict[str, Any]) -> torch.nn.Module:
-        ctor_kwargs: Dict[str, Any] = dict(
-            in_channels=model_config.get("in_channels", 1),
-            head_channels=model_config.get("head_channels", HEAD_CHANNELS),
-            feature_size=model_config.get("feature_size", 64),
-            dtype=model_config.get("dtype", "bf16"),
-        )
-        # Omit variant when unset so Nano / Edge / Super keep their own
-        # class defaults (NANO / EDGE / SUPER).
-        if model_config.get("variant") is not None:
-            ctor_kwargs["variant"] = model_config["variant"]
-        model = self._model_cls(
-            **ctor_kwargs,
-            pretrained=model_config.get("pretrained", True),
-            freeze_dit_backbone=model_config.get("freeze_dit_backbone", False),
-            freeze_understanding_ffn=model_config.get("freeze_understanding_ffn", True),
-            freeze_understanding_stream=model_config.get("freeze_understanding_stream", False),
-            freeze_vae_decoder=model_config.get("freeze_vae_decoder", False),
-            freeze_vae_encoder=model_config.get("freeze_vae_encoder", True),
-            gradient_checkpointing=model_config.get("gradient_checkpointing", False),
-            feature_layers=model_config.get("feature_layers"),
-            cache_dir=model_config.get("cache_dir"),
-            hf_token=model_config.get("hf_token"),
-            dropout=model_config.get("dropout", 0.0),
-            decode_chunk=model_config.get("decode_chunk", 16),
-            vae_symmetrize_z=model_config.get("vae_symmetrize_z", False),
-            **self._extra_model_kwargs(model_config),
-        )
-        return model
-
-    def _extra_model_kwargs(
-        self, model_config: Dict[str, Any],
-    ) -> Dict[str, Any]:
-        """Subclass hook: forward arch-specific kwargs to ``_model_cls``.
-
-        The Cosmos 3 tiers inherit the empty-dict default. A backbone
-        with extra constructor kwargs overrides this.
-        """
-        return {}
 
     # ------------------------------------------------------------------
     # Scheduled DiT thaw (``model.freeze_dit_backbone: N`` warm-up)
@@ -222,7 +171,7 @@ class BaseCosmosModule(BaseCircuitModule):
         Non-finite-batch events are emitted at DEBUG level (silent by
         default). bf16-true with ``gradient_clip_val=1.0`` can still trip
         the guard, and the log line is emitted on every DDP rank. Raise the
-        ``ncntm.modules.cosmos_2_5_common.base`` logger to DEBUG
+        ``ncntm.modules.backbone`` logger to DEBUG
         (or set ``NCNTM_GRAD_GUARD_LOG=warning`` -- see
         :data:`_GRAD_GUARD_LOG_FN`) to surface them again.
 
@@ -273,11 +222,11 @@ class BaseCosmosModule(BaseCircuitModule):
         lr = self.optimizer_config.get("lr", 1e-4)
         wd = self.optimizer_config.get("weight_decay", 1e-5)
         # AdamW betas: default to PyTorch's (0.9, 0.999); a lower beta2
-        # (e.g. 0.99, as in the Cosmos-3 generator recipe) adapts the
+        # (e.g. 0.99) adapts the
         # second moment faster when fine-tuning a pretrained backbone.
         betas = tuple(self.optimizer_config.get("betas", (0.9, 0.999)))
-        # AdamW epsilon.  PyTorch default 1e-8; the Cosmos 3 framework SFT
-        # recipe notes 1e-6 is preferable under bf16 (avoids underflow in the
+        # AdamW epsilon.  PyTorch default 1e-8; 1e-6 is often
+        # preferable under bf16 (avoids underflow in the
         # squared-gradient denominator).  Default keeps the historical 1e-8 so
         # configs that don't set it are byte-for-byte unchanged.
         eps = float(self.optimizer_config.get("eps", 1e-8))
@@ -489,4 +438,4 @@ class BaseCosmosModule(BaseCircuitModule):
         self._dit_update_ratio = None
 
 
-__all__ = ["BaseCosmosModule"]
+__all__ = ["BackboneModule"]

@@ -1,21 +1,23 @@
 # =====================================================================
-# pretrain_snemi3d.yaml  --  Cosmos3-Edge (4B) self-supervised pretraining on
-# SNEMI3D / Kasthuri 2015 raw EM only (no segmentation)
+# pretrain_snemi3d.yaml  --  VoxelDiT2-3D (H/16, ~1B) self-supervised
+# pretraining on SNEMI3D / Kasthuri 2015 raw EM only (no segmentation)
 # =====================================================================
 # Every batch is task ``ssl``: reconstruct clean 4 nm EM from a degraded
-# large-voxel input (RandResolutionDegraded).  Same model, fine grid, SSL
-# degradation and loss as the nanoCosmos 4B pretrain, restricted to the
-# volumes in data/SNEMI3D (see docs/DATASETS.md).
+# large-voxel input (RandResolutionDegraded).  The backbone is a pixel-space
+# diffusion transformer on 16^3 voxel patches (no VAE); the rectified-flow
+# term runs on voxels.  Volumes are those in data/SNEMI3D (see
+# docs/DATASETS.md).
 #
 # The head is still 32 channels (30 affinity offsets + sem + raw) so a later
 # SFT run can load this checkpoint without a head-shape change.
 #
 # Volumes resolve under $NCNTM_DATA_DIR (default: <cwd>/data); missing
 # volumes are skipped with a warning, so run from the repo root.
-# Backbone weights come from $NCNTM_CACHE_DIR (default ~/.cache/ncntm/cosmos25).
+# The 2-D PixelDiT2 checkpoint comes from $NCNTM_CACHE_DIR (default
+# ~/.cache/ncntm/pixeldit2).
 # =====================================================================
 
-experiment_name: ncntm-4B-pretrain-snemi3d
+experiment_name: ncntm-pixeldit2-h16-pretrain-snemi3d
 project_name: ncntm
 seed: 42
 ckpt_path: null
@@ -25,8 +27,8 @@ ckpt_path_only_prefixes: null
 snemi3d_root: ${oc.env:NCNTM_DATA_DIR,${hydra:runtime.cwd}/data}/SNEMI3D
 
 data:
-  # Fixed fine network grid: 4 nm cubic voxel, patch (z, y, x).  Wan2.2 VAE
-  # is 4x in z and 16x in xy -> DiT latent grid (64, 16, 16).
+  # Fixed fine network grid: 4 nm cubic voxel, patch (z, y, x).  16^3 voxel
+  # DiT patches -> token grid (16, 16, 16), 4096 tokens.
   patch_size: [256, 256, 256]
   pixel_size: [4, 4, 4]
   # Train-only z/y/x permutation (cubic FOV); section degradation follows
@@ -67,7 +69,7 @@ data:
   branches:
     ssl:
       task: ssl
-      batch_size: 2
+      batch_size: 4
       sample_weight: 1.0
       volumes:
       # Kasthuri cropping (cc): x 2512-8416, y 4432-9248, z 0-1848.  It
@@ -84,10 +86,10 @@ data:
         dataset: kasthuri_cc
         native_resolution: [30, 6, 6]
         imaging: ssSEM
-  val_batch_size: 2
+  val_batch_size: 4
   # One group per dataset name: 4 SNEMI3D groups x 16 crops / batch 2 = 32 batches.
   val_balance: dataset
-  val_num_samples: 16
+  val_num_samples: 100
   val_volumes:
   - vol: AC3_cc_inputs
     root: ${snemi3d_root}
@@ -117,27 +119,24 @@ data:
     imaging: ssSEM
 
 model:
-  type: joint3d_edge           # JointEdge3DModule (Cosmos3-Edge ~4B)
-  variant: EDGE
+  type: joint3d_voxeldit       # JointVoxelDiT3DModule (VoxelDiT2-3D)
+  variant: H/16                # hidden 1280, 32 blocks, 16^3 voxel patches
   in_channels: 1
   head_channels: 32            # len(loss.seg.offsets)=30 + sem + raw
   feature_size: 64
+  pixel_channels: 16           # unpatchified DiT features fed to the head
   dropout: 0.5
+  # Inflate the released 2-D nvidia/PixelDiT2-ImageNet H/16 (256 px) weights
+  # to 3-D; false trains the same geometry from random init.
   pretrained: true
   dtype: bf16                  # paired with training.precision bf16-true
-  # Frozen: Wan VAE encoder and decoder, and the AR reasoner (embed_tokens,
-  # AR MLP / norms, lm_head, AR half of packed attention).  The DiT
-  # generation half, EM feature projector and task head train.
-  freeze_vae_encoder: true
-  freeze_vae_decoder: true
   freeze_dit_backbone: false
-  freeze_understanding_stream: true
-  freeze_understanding_ffn: true
-  gradient_checkpointing:
-  - dit
-  - decode
-  vae_input_pm1: true
-  vae_symmetrize_z: false
+  # No representation grounding: the DiT conditions on timestep and class
+  # only, so DINOv3 / timm are not loaded.
+  grounding_encoder: null
+  gradient_checkpointing: false
+  # The task forward reads the DiT at the degraded endpoint of the flow.
+  feature_timestep: 1.0
 
 optimizer:
   lr: 6.0e-5
@@ -270,7 +269,7 @@ callbacks:
     mode: min
     save_last: true
     verbose: true
-  # Trainable weights only, ~2.8 GB each in bf16; save_top_k -1 keeps all.
+  # Trainable weights only, ~2 GB each in bf16; save_top_k -1 keeps all.
   weights_checkpoint:
     enabled: true
     every_n_epochs: 20

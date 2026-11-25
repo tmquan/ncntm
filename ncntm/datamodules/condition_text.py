@@ -1,4 +1,4 @@
-"""Fixed short batch prompts for joint Cosmos3 training.
+"""Fixed short batch prompts for joint training.
 
 Template::
 

@@ -1,8 +1,7 @@
 """
 Base Lightning module shared by every ncntm training recipe.
 
-All modules in :mod:`ncntm.modules` (``Cosmos3Nano3DModule`` and the
-``Joint*3DModule`` recipes) run the same training / evaluation loop:
+All modules in :mod:`ncntm.modules` (the ``Joint*3DModule`` recipes) run the same training / evaluation loop:
 
 * forward the volume through the wrapper (``self.model``)
 * apply the module's configured loss (``_loss_cls`` -- ``AffinityFGLoss`` for
@@ -206,8 +205,8 @@ class BaseCircuitModule(pl.LightningModule):
         """Instantiate the wrapper.
 
         Default: forward every ``model_config`` entry as kwargs to
-        :attr:`_model_cls`.  Cosmos overrides this to add the freeze
-        schedule and backbone bookkeeping.
+        :attr:`_model_cls`.  Subclasses override this to add
+        backbone-specific bookkeeping.
         """
         return self._model_cls(**model_config)
 

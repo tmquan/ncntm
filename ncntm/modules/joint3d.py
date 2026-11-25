@@ -1,10 +1,10 @@
 """
 Joint reconstruction + segmentation Lightning module (the ncntm recipe).
 
-``Joint3DModule`` reuses the **whole** Cosmos-3 Nano training/eval machinery
-(model build, freeze schedule, optimiser param-group split, gradient guard,
+``Joint3DModule`` reuses the **whole** training/eval machinery
+(freeze schedule, optimiser param-group split, gradient guard,
 the epoch-end reduce/log loop) from
-:class:`~ncntm.modules.cosmos_3_nano.module.Cosmos3Nano3DModule`, and
+:class:`~ncntm.modules.backbone.BackboneModule`, and
 swaps in :class:`~ncntm.losses.Joint3DReconSegLoss`.  Only three things
 differ from the plain affinity recipe, all task-routing:
 
@@ -30,18 +30,19 @@ Batches must be **task-homogeneous** (one branch per step) -- the joint
 datamodule's round-robin sampler guarantees this.
 """
 
+import inspect
 from typing import Any, Dict
 
 import torch
 from einops import rearrange
 
 from ncntm.losses import SSL, Joint3DReconSegLoss
-from ncntm.models.cosmos_3_edge import Cosmos3EdgeWrapper
-from ncntm.modules.cosmos_3_nano.module import Cosmos3Nano3DModule
+from ncntm.models.voxeldit2 import VoxelDiT2Wrapper3D
+from ncntm.modules.backbone import BackboneModule
 
 
-class Joint3DModule(Cosmos3Nano3DModule):
-    """Cosmos-3 Nano backbone trained with the joint recon + seg loss."""
+class Joint3DModule(BackboneModule):
+    """Backbone trained with the joint recon + seg loss (subclasses set ``_model_cls``)."""
 
     _loss_cls = Joint3DReconSegLoss
 
@@ -266,21 +267,34 @@ class Joint3DModule(Cosmos3Nano3DModule):
         self._accumulate_instance_metrics(pooled, targets, prefix, bs)
 
 
-class JointEdge3DModule(Joint3DModule):
-    """Cosmos3-**Edge** (4B) backbone trained with the joint recon + seg loss.
+class JointVoxelDiT3DModule(Joint3DModule):
+    """**VoxelDiT2-3D** backbone trained with the joint recon + seg loss.
 
-    Identical recipe to :class:`Joint3DModule` (the Nano joint module); the only
-    difference is the backbone -- the 4B Cosmos3-Edge omni transformer, loaded
-    from the released ``nvidia/Cosmos3-Edge`` checkpoint (see
-    :class:`~ncntm.models.cosmos_3_edge.Cosmos3EdgeWrapper`), or random-init
-    when ``model.pretrained=false``.  Edge uses the same Wan2.2 VAE family
-    (16x spatial / 4x temporal), so the data / loss / pooling recipe is unchanged.
+    Same recipe as :class:`Joint3DModule`; the backbone is the pixel-space
+    :class:`~ncntm.models.voxeldit2.VoxelDiT2Wrapper3D` (no VAE), inflated
+    from the released 2-D ``nvidia/PixelDiT2-ImageNet`` H/16 weights or
+    random-init when ``model.pretrained=false``. The head is on the input
+    grid, so the data / loss / pooling recipe is unchanged; the
+    rectified-flow term runs on voxels instead of a latent.
+
+    ``model_config`` keys are the wrapper's constructor arguments; any other
+    key is an error.
     """
 
-    _model_cls = Cosmos3EdgeWrapper
+    _model_cls = VoxelDiT2Wrapper3D
+
+    def _build_model(self, model_config: Dict[str, Any]) -> torch.nn.Module:
+        accepted = set(inspect.signature(self._model_cls.__init__).parameters) - {"self"}
+        unknown = sorted(set(model_config) - accepted)
+        if unknown:
+            raise ValueError(
+                f"{type(self).__name__}: unknown model config keys {unknown}; "
+                f"accepted: {sorted(accepted)}."
+            )
+        return self._model_cls(**model_config)
 
 
 __all__ = [
     "Joint3DModule",
-    "JointEdge3DModule",
+    "JointVoxelDiT3DModule",
 ]

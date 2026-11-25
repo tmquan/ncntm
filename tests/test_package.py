@@ -153,15 +153,22 @@ def string_constants(tree):
 
 
 def test_no_absolute_path_of_a_user_or_a_machine():
-    """Paths are derived from __file__, from environment variables or from tempfile: no string in
-    the code names a home directory, a temporary directory or another fixed place of one machine.
-    (Docstrings and comments are searched too: an example path there would be copied.)"""
-    place = re.compile(r"(?<![\w.])(/home/|/tmp/|/Users/|/root/|/mnt/|/media/|/scratch/|/workspace/)\w|[A-Za-z]:\\\\\w")
+    """Paths are derived from __file__, from environment variables or from tempfile.
+    Nowhere, not even in a docstring or a comment (an example there would be copied), is a home
+    directory named.  No string of the code names a temporary or mounted directory either; a
+    docstring may (kit.py says where Kit keeps its temporary files when left alone)."""
+    home = re.compile(r"(?<![\w.~])(/home/|/Users/|/root/)\w|[A-Za-z]:\\\\\w")
+    fixed_place = re.compile(r"(?<![\w.])(/tmp/|/mnt/|/media/|/scratch/|/workspace/)\w")
     found = []
     for path in SOURCES + sorted(PACKAGE.glob("apps/*")):
-        for number, line in enumerate(path.read_text().splitlines(), start=1):
-            if place.search(line):
+        text = path.read_text()
+        for number, line in enumerate(text.splitlines(), start=1):
+            if home.search(line):
                 found.append(f"{path.relative_to(REPO)}:{number}: {line.strip()[:120]}")
+        if path.suffix == ".py":
+            for number, value in string_constants(ast.parse(text)):
+                if fixed_place.search(value):
+                    found.append(f"{path.relative_to(REPO)}:{number}: {value.strip()[:120]!r}")
     assert not found, "\n" + "\n".join(found)
 
 

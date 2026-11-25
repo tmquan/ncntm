@@ -6,7 +6,9 @@ The script form prints the start-up and shutdown times of every kernel at the en
 
 Three groups
     installer    scripts/install_kernel.py with stand-in interpreters: run everywhere
-    decisions    the graphics probe and the tier choice, without Kit: run everywhere
+    decisions    the graphics probe, the tier choice, the experience files, the arguments every
+                 start hands to Kit (crash reporter and telemetry off), without Kit: run everywhere
+                 (kit.py is loaded by its path where the package around it cannot be imported)
     kernels      short notebooks executed in a REAL kernel through jupyter_client: need
                  jupyter_client in the Python running the tests, an Isaac Sim that
                  install_kernel.py can find (with ipykernel), and the licence accepted in the
@@ -14,7 +16,8 @@ Three groups
                  Otherwise every one of them is skipped with the reason.
 
 The kernel spec is installed into a temporary prefix and found through JUPYTER_PATH; nothing
-is written to ~/.local or into the Isaac Sim environment.  Kit's files go to a temporary root.
+is written to ~/.local or into the Isaac Sim environment.  Kit's files go to a temporary root,
+Warp's and CUDA's compiler caches into the same test folder (WARP_CACHE_PATH, CUDA_CACHE_PATH).
 Every Kit start has the crash reporter and telemetry off (asserted) and no core files.
 
 Environment
@@ -29,6 +32,9 @@ What these tests cannot show on a machine without a graphics device: a positive
 the negative path there and the positive path where RTX works; in both cases it runs the
 capture sequence itself (render product, annotator, orchestrator step), so that every call
 in it has been made against the installed Isaac Sim.
+
+The kernels of these tests name their tier (or set NCNTM_KIT): none uses the automatic choice,
+which on a machine with RTX would start the stock application in every one of them.
 
 A binary / source build of Isaac Sim (python.sh) is stood in for by a folder of that shape
 made from the pip install (test_source_build_layout_through_python_sh); on a machine that
@@ -122,8 +128,21 @@ def out_dir() -> Path:
         path.mkdir(parents=True, exist_ok=True)
         return path
     path = Path(tempfile.mkdtemp(prefix="ncntm_test_kit_"))
-    atexit.register(shutil.rmtree, path, ignore_errors=True)
+    atexit.register(remove_tree, path)
     return path
+
+
+def remove_tree(path):
+    """shutil.rmtree that also gets past a folder its owner may not list (the stock application creates
+    data/documents/Kit/shared/screenshots with mode 000 in its Kit folder; start_kit opens it again)."""
+    for folder, names, _ in os.walk(path):
+        for name in names:
+            try:
+                if not os.path.islink(os.path.join(folder, name)):
+                    os.chmod(os.path.join(folder, name), 0o700)
+            except OSError:
+                pass
+    shutil.rmtree(path, ignore_errors=True)
 
 
 def installer_module():
@@ -818,6 +837,42 @@ def test_describe_says_why_once_and_how_to_override():
     assert "start_kit(tier='full') in a new kernel should give RTX" in session.renderer_status().reason
 
 
+def test_what_the_exit_hook_tidies_up():
+    """The process leaves with os._exit, so what an ordinary exit would have removed is removed by hand:
+    folders of tempfile.TemporaryDirectory objects (Warp keeps 70 MB of precompiled header in one); and the
+    folder the stock application creates with mode 000 in the Kit folder is opened, or nobody can delete it."""
+    work = out_dir() / "tidy"
+    work.mkdir(exist_ok=True)
+    # in a child process: it removes EVERY such folder of its process, which must not be the one running the tests
+    code = ("import json, os, tempfile\n" + LOAD_KIT_BY_PATH +
+            "held = tempfile.TemporaryDirectory(prefix='held_', dir=sys.argv[1])\n"
+            "open(os.path.join(held.name, 'wp_stand_in.pch'), 'wb').write(b'x' * 1000)\n"
+            "first = kit._remove_temporary_directories()\n"
+            "print('RESULT ' + json.dumps({'first': first, 'there': os.path.exists(held.name), "
+            "'second': kit._remove_temporary_directories(), 'name': held.name}))\n")
+    done = subprocess.run([sys.executable, "-c", code, str(work)], capture_output=True, text=True, timeout=120,
+                          env=dict(os.environ, PYTHONDONTWRITEBYTECODE="1"))
+    lines = [line for line in done.stdout.splitlines() if line.startswith("RESULT ")]
+    assert lines, done.stdout + done.stderr
+    tidied = json.loads(lines[-1][len("RESULT "):])
+    assert tidied["first"] >= 1 and tidied["there"] is False and not os.path.exists(tidied["name"])
+
+    root = work / "kit_root"
+    closed = root / "data" / "documents" / "Kit" / "shared" / "screenshots"
+    closed.mkdir(parents=True, exist_ok=True)
+    (root / "data" / "documents" / "Kit" / "shared" / "exts").mkdir(exist_ok=True)
+    os.chmod(closed, 0)
+    try:
+        if os.access(closed, os.R_OK):
+            skip("this user can read a folder of mode 000 (root?): nothing to show")
+        assert kit._open_closed_folders(str(root)) == 1
+        assert os.access(closed, os.R_OK | os.W_OK | os.X_OK) and os.listdir(closed) == []
+        assert kit._open_closed_folders(str(root)) == 0                    # nothing left to open
+        assert kit._open_closed_folders(str(work / "no_such_root")) == 0
+    finally:
+        os.chmod(closed, 0o700)
+
+
 def test_importing_kit_loads_nothing_heavy():
     """``from ncntm.viz import kit`` is the first line of every notebook: it must not load pxr or warp (which have
     to come after start_kit), nor Isaac Sim, nor torch."""
@@ -1106,7 +1161,10 @@ def setup():
     env.update(JUPYTER_PATH=str(prefix / "share" / "jupyter"), JUPYTER_RUNTIME_DIR=str(jupyter / "runtime"),
                JUPYTER_CONFIG_DIR=str(jupyter / "config"), JUPYTER_DATA_DIR=str(jupyter / "data"),
                IPYTHONDIR=str(jupyter / "ipython"), MPLCONFIGDIR=str(jupyter / "mpl"),
-               NCNTM_KIT_ROOT=str(out_dir() / "kit_root"), NCNTM_TEST_REPO=str(REPO), NCNTM_TEST_OUT_DIR=str(out_dir()))
+               NCNTM_KIT_ROOT=str(out_dir() / "kit_root"), NCNTM_TEST_REPO=str(REPO), NCNTM_TEST_OUT_DIR=str(out_dir()),
+               # what the kernels compile stays in the test folder too: Warp's kernel cache (otherwise ~/.cache/warp,
+               # where every run would leave the kernels of warp_compile_cell behind) and CUDA's (~/.nv/ComputeCache)
+               WARP_CACHE_PATH=str(out_dir() / "warp_cache"), CUDA_CACHE_PATH=str(out_dir() / "cuda_cache"))
     for name in (kit.ENV_TIER, kit.ENV_GPU):
         env.pop(name, None)
     for name in ("JUPYTER_PATH", "JUPYTER_RUNTIME_DIR", "JUPYTER_CONFIG_DIR", "JUPYTER_DATA_DIR"):
@@ -1218,6 +1276,48 @@ class Kernel:
 
 def start_cell(tier, extra=""):
     return PRELUDE + f"s = kit.start_kit({tier!r}, gpu={GPU}{extra})\n"
+
+
+def warp_compile_cell():
+    """A cell that makes Warp COMPILE a kernel it has never seen (the number in it is new on every run) on the
+    session GPU.  The compiler (NVRTC) writes into TMPDIR; with Kit's Warp 1.17 it refused a long one."""
+    return ("try:\n    import warp as wp\nexcept ImportError as error:\n"
+            "    print('RESULT ' + json.dumps({'warp': None, 'why': str(error)}))\n"
+            "else:\n"
+            "    import numpy as np\n"
+            "    @wp.kernel\n"
+            "    def fresh(a: float, x: wp.array(dtype=float), y: wp.array(dtype=float)):\n"
+            "        i = wp.tid()\n"
+            f"        y[i] = a * x[i] + y[i] + 0.0 * {time.time_ns()}.0\n"
+            "    x = wp.array(np.arange(1000, dtype=np.float32), device=s.device)\n"
+            "    y = wp.array(np.ones(1000, dtype=np.float32), device=s.device)\n"
+            "    wp.launch(fresh, dim=1000, inputs=[2.0, x, y], device=s.device)\n"
+            "    pch = []                               # where Warp keeps the precompiled header of its compiler (70 MB)\n"
+            "    for name in ('warp._src.context', 'warp.context'):\n"
+            "        runtime = getattr(sys.modules.get(name), 'runtime', None)\n"
+            "        try:\n"
+            "            pch = pch or [d.name for d in runtime._pch_dirs.values()]\n"
+            "        except Exception:\n"
+            "            pass\n"
+            "    print('RESULT ' + json.dumps({'warp': str(wp.__version__), 'kit_build': 'omni.warp.core' in wp.__file__,\n"
+            "        'total': float(y.numpy().sum()), 'tmpdir': os.environ.get('TMPDIR'), 'pch_dirs': pch,\n"
+            "        'pch_there': [os.path.isdir(d) for d in pch],\n"
+            "        'root_tmp_chars': len(os.path.join(s.root, 'tmp')), 'errors': len(s.kit_errors())}))")
+
+
+def check_warp_compiled(cell, tier):
+    """Asserts on the cell of warp_compile_cell(), AFTER its kernel was shut down; returns a line for the
+    report ('' if Warp is not there)."""
+    warp = result(cell)
+    if warp["warp"] is None:
+        return ""
+    assert warp["total"] == 2.0 * sum(range(1000)) + 1000.0, warp
+    assert warp["tmpdir"] == setup().env.get("TMPDIR"), warp               # TMPDIR is not left pointing into the Kit folder
+    left = [folder for folder in warp["pch_dirs"] if os.path.exists(folder)]
+    assert not left, f"the kernel left Warp's temporary folders behind: {left}"      # the exit hook removes them
+    gone = f"; its {len(warp['pch_dirs'])} temporary folder(s) of the compiler are gone after the kernel ended" if warp["pch_dirs"] else ""
+    return (f"tier {tier}: Warp {warp['warp']} ({'Kit' if warp['kit_build'] else 'interpreter'} build) compiled a new kernel on the "
+            f"session GPU (the tmp folder of this Kit root is {warp['root_tmp_chars']} characters long){gone}")
 
 
 @once
@@ -1365,6 +1465,9 @@ def notebook_usd():
             "import logging\n"
             "D = os.environ['NCNTM_TEST_OUT_DIR']\n"
             "f_text = open(os.path.join(D, 'unflushed.txt'), 'w'); f_text.write('result line\\n' * 10)\n"
+            "import tempfile\n"
+            "kept_alive = tempfile.TemporaryDirectory(prefix='left_temporary_', dir=D)\n"
+            "open(os.path.join(kept_alive.name, 'big.bin'), 'wb').write(b'x' * 1000)\n"
             "handler = logging.FileHandler(os.path.join(D, 'logging.txt')); logging.getLogger('ncntm.test').addHandler(handler)\n"
             "logging.getLogger('ncntm.test').warning('logged line')\n"
             "try:\n"
@@ -1373,7 +1476,8 @@ def notebook_usd():
             "    have_h5 = True\n"
             "except ImportError:\n"
             "    have_h5 = False\n"
-            "print('RESULT ' + json.dumps({'h5py': have_h5, 'bytes_on_disk_now': os.path.getsize(os.path.join(D, 'unflushed.txt'))}))")
+            "print('RESULT ' + json.dumps({'h5py': have_h5, 'bytes_on_disk_now': os.path.getsize(os.path.join(D, 'unflushed.txt')),\n"
+            "    'temporary': kept_alive.name, 'temporary_there': os.path.isdir(kept_alive.name)}))")
         r.last = kernel.run("print('RESULT ' + json.dumps({'errors': s.kit_errors()}))")
     finally:
         r.timing = kernel.shutdown()
@@ -1581,6 +1685,8 @@ def test_exit_hook_flushes_files_left_open():
     out = out_dir()
     assert (out / "unflushed.txt").read_text() == "result line\n" * 10     # ... and is on disk after the kernel is gone
     assert (out / "logging.txt").read_text().strip() == "logged line"
+    # a tempfile.TemporaryDirectory that was still alive is removed, as an ordinary interpreter exit would do
+    assert files["temporary_there"] is True and not os.path.exists(files["temporary"])
     if files["h5py"]:
         check = subprocess.run([setup().python, "-c", "import h5py, sys\nwith h5py.File(sys.argv[1], 'r') as f:\n"
                                 "    print('H5 OK', f['x'].shape[0], int(f['x'][999]))", str(out / "open.h5")],
@@ -1665,6 +1771,112 @@ def test_licence_not_accepted_gives_a_readable_error():
     assert result(off) == "off"                                            # working without Kit is still possible
 
 
+def test_warp_imported_first_is_refused_where_kit_brings_its_own():
+    """warp imported before start_kit: tiers "core" and "full" load Isaac Sim's own Warp, and the two do not mix
+    (measured: the first array failed with an ImportError).  Refused with the order to use; tier "usd" starts and
+    warns that the same notebook would be refused where another tier is chosen."""
+    kernel = Kernel("warp first", env={kit.ENV_TIER: "usd"})
+    try:
+        kernel.timing["tier"] = "usd"
+        first = kernel.run(NO_CORE_FILE + PRELUDE + "try:\n    import warp\n    have = str(warp.__version__)\n"
+                           "except ImportError:\n    have = None\nprint('RESULT ' + json.dumps(have))")
+        have = result(first)
+        if have is not None:                                               # else: nothing to refuse, and no Kit is started
+            refused = kernel.run(f"s = kit.start_kit('core', gpu={GPU})")
+            after = kernel.run("print('RESULT ' + json.dumps({'isaacsim': 'isaacsim' in sys.modules, 'session': kit.current_session() is None}))")
+            slim = kernel.run("import warnings\nimport numpy as np\n"
+                              "with warnings.catch_warnings(record=True) as caught:\n    warnings.simplefilter('always')\n"
+                              f"    s = kit.start_kit(gpu={GPU})\n"
+                              "x = warp.array(np.arange(10, dtype=np.float32), device=s.device)\n"
+                              "print('RESULT ' + json.dumps({'tier': s.tier, 'source': s.choice.source, 'warnings': [str(w.message) for w in caught], "
+                              "'sum': float(x.numpy().sum()), 'warp': s.warp_version, 'errors': s.kit_errors(), "
+                              "'start_seconds': s.start_seconds}))")
+    finally:
+        timing = kernel.shutdown()
+    if have is None:
+        skip("warp cannot be imported without Kit by this interpreter: there is nothing to guard against")
+    assert refused.error is not None and refused.error.startswith("RuntimeError: warp "), refused.error
+    assert "before Kit was started" in refused.error and "a cell of this notebook" in refused.error
+    assert "Restart the kernel" in refused.error and "session = kit.start_kit()" in refused.error
+    assert "ncntm.viz.emray" in refused.error and "kit.start_kit(tier='usd')" in refused.error
+    assert result(after) == {"isaacsim": False, "session": True}           # Kit was not touched
+    facts = result(slim)
+    kernel.timing["start_kit_s"] = facts["start_seconds"]
+    assert facts["tier"] == "usd" and facts["source"] == kit.ENV_TIER and facts["errors"] == []
+    assert facts["sum"] == 45.0 and facts["warp"] == have                  # tier usd: the interpreter's Warp, and it works
+    assert any("warp was imported before kit.start_kit()" in w and "refused" in w for w in facts["warnings"]), facts["warnings"]
+    assert timing["exit_code"] == 0
+
+
+COPY_PRELUDE = "import json, os, sys, time\nsys.path.insert(0, {!r})\nfrom kitcopy import kit\n"
+
+
+def kit_copy(name, apps=None) -> Path:
+    """kit.py alone, as the package "kitcopy" in the test folder, with the experience files given as
+    {tier: text} (None: no apps folder at all, as in a clone of the repository, which ignores *.kit)."""
+    package = out_dir() / name / "kitcopy"
+    package.mkdir(parents=True, exist_ok=True)
+    (package / "__init__.py").write_text("")
+    shutil.copy(KIT_PY, package / "kit.py")
+    for tier, text in (apps or {}).items():
+        (package / "apps").mkdir(exist_ok=True)
+        (package / "apps" / kit.EXPERIENCES[tier]).write_text(text)
+    return package.parent
+
+
+def test_kit_starts_without_the_experience_files():
+    """A clone has no apps/*.kit: Kit starts from the text kept in kit.py, written into the Kit folder."""
+    target = kit_copy("clone_without_apps")
+    kernel = Kernel("no .kit files")
+    try:
+        kernel.timing["tier"] = "usd"
+        started = kernel.run(COPY_PRELUDE.format(str(target)) + f"s = kit.start_kit('usd', gpu={GPU})\n"
+                             "experience = [a for a in s.launch_args if a.endswith('.kit')]\n"
+                             "from pxr import UsdGeom\nstage = s.new_stage(); UsdGeom.Cube.Define(stage, '/World/Cube'); s.update(2)\n"
+                             "print('RESULT ' + json.dumps({'apps_dir': os.path.isdir(kit.APPS_DIR), 'experience': experience, "
+                             "'same': [open(e).read() == kit.EXPERIENCE_TEXT['usd'] for e in experience], 'root': s.root, "
+                             "'errors': s.kit_errors(), 'start_seconds': s.start_seconds, 'extensions': s.extensions, "
+                             "'prims': [str(p.GetPath()) for p in s.stage.Traverse()], 'file': kit.__file__}))")
+    finally:
+        timing = kernel.shutdown()
+    facts = result(started)
+    kernel.timing["start_kit_s"] = facts["start_seconds"]
+    assert facts["file"] == str(target / "kitcopy" / "kit.py") and facts["apps_dir"] is False
+    assert facts["experience"] == [os.path.join(facts["root"], "apps", kit.EXPERIENCES["usd"])] and facts["same"] == [True]
+    assert facts["errors"] == [] and facts["extensions"] > 5 and "/World/Cube" in facts["prims"]
+    assert timing["exit_code"] == 0
+
+
+def test_a_kit_that_cannot_start_says_why_and_leaves_cleanly():
+    """Kit gives up while it starts (here: the experience asks for an extension this Isaac Sim does not have, what
+    another build of Isaac Sim may do to the slim tiers).  The error quotes what Kit said and names the ways out;
+    the kernel survives, a second attempt is refused, and the kernel still ends with exit code 0 and flushed files."""
+    wanted = '"omni.kit.primitive.mesh" = {}'
+    assert wanted in kit.EXPERIENCE_TEXT["usd"]
+    broken = kit.EXPERIENCE_TEXT["usd"].replace(wanted, wanted + '\n"omni.no.such.extension.for.ncntm" = {}', 1)
+    target = kit_copy("broken_experience", apps={"usd": broken})
+    left_open = out_dir() / "failed_start_left_open.txt"
+    kernel = Kernel("cannot start")
+    try:
+        first = kernel.run(COPY_PRELUDE.format(str(target)) + f"left_open = open({str(left_open)!r}, 'w'); left_open.write('kept')\n"
+                           f"s = kit.start_kit('usd', gpu={GPU})\nprint('NOT REACHED')")
+        again = kernel.run(f"s = kit.start_kit('usd', gpu={GPU})")
+        alive = kernel.run("print('RESULT ' + json.dumps({'session': kit.current_session() is None, 'tmpdir': os.environ.get('TMPDIR')}))")
+    finally:
+        timing = kernel.shutdown()
+    assert first.error is not None and first.error.startswith("RuntimeError: Kit did not start (tier 'usd')"), first.error
+    assert "NOT REACHED" not in first.text
+    assert "Kit said:" in first.error and "omni.no.such.extension.for.ncntm" in first.error      # the reason, not just a log path
+    assert "Full log: " in first.error and "restart the kernel" in first.error
+    assert "start_kit(tier='full')" in first.error and "start_kit(tier='off')" in first.error
+    assert again.error is not None and again.error.startswith("RuntimeError: Kit is in an undefined state"), again.error
+    assert result(alive) == {"session": True, "tmpdir": setup().env.get("TMPDIR")}       # the kernel lives; TMPDIR was put back
+    assert uploads_in(setup().root) == []
+    # the exit hook is in place although the start failed: no crash while the kernel ends, and open files are flushed
+    assert timing["exit_code"] == 0 and timing["shutdown_s"] < GRACE_SECONDS, timing
+    assert left_open.read_text() == "kept"
+
+
 def test_a_start_that_is_cut_short_taints_the_session():
     """KeyboardInterrupt (or anything else) escaping from SimulationApp(): no second attempt."""
     kernel = Kernel("cut short")
@@ -1702,12 +1914,16 @@ def test_interrupt_while_kit_starts_is_held_back():
                            "'errors': s.kit_errors(), 'extensions': s.extensions, 'privacy': s.privacy(), 'warp': s.warp_version, "
                            "'args_ok': all(a in s.launch_args for a in kit.PRIVACY_ARGS) and kit.excluded_extensions_arg() in s.launch_args}))")
         use = kernel.run(STAGE_CODE + "stage = build(s.new_stage()); s.update(3)\nprint('RESULT ' + json.dumps(measure(stage)))")
+        compiled = kernel.run(warp_compile_cell(), timeout=600)
         pump = kernel.run("n = 0\nfor i in range(500):\n    s.update(); time.sleep(0.02); n += 1\nprint('NOT REACHED')", interrupt_after=1.0)
         after = kernel.run("s.update(2)\nprint('RESULT ' + json.dumps({'n': n, 'errors': s.kit_errors()}))")
     finally:
         timing = kernel.shutdown()
     facts = result(again)
     kernel.timing["start_kit_s"] = facts["start_seconds"]
+    line = check_warp_compiled(compiled, "core")                           # Kit's own Warp compiles, whatever the Kit folder is called
+    if line:
+        print(line)
     assert first.error is not None and first.error.startswith("KeyboardInterrupt"), first.error
     assert "Kit is intact" in first.error and "NOT REACHED" not in first.text
     assert first.seconds >= facts["start_seconds"] > 1.0                   # the cell ended only when the start was complete
@@ -1928,6 +2144,8 @@ def test_source_build_layout_through_python_sh():
     spec = spec_of(env.prefix, "ncntm-standin")
     assert spec["argv"][0] == str(release / "python.sh") and spec["interrupt_mode"] == "message"
     assert kit.EULA_VARIABLE not in spec["env"]
+    # the installer sees the build's own record of the licence and does not ask for the variable
+    assert str(repo / ".eula_accepted") in text and "NOT accepted for you" not in text, text
     kernel = Kernel("source build, python.sh", name="ncntm-standin", drop=(kit.EULA_VARIABLE,))
     try:
         kernel.timing["tier"] = "usd"
@@ -2024,7 +2242,8 @@ def test_full_tier_rtx_path():
             "import carb.settings\n"
             "settings = carb.settings.get_settings()\n"
             "out = {'mode_before': settings.get('/rtx/rendermode'), 'spp_before': settings.get('/rtx/pathtracing/spp'),\n"
-            "       'total_before': settings.get('/rtx/pathtracing/totalSpp'), 'persp': bool(s.stage.GetPrimAtPath('/OmniverseKit_Persp'))}\n"
+            "       'total_before': settings.get('/rtx/pathtracing/totalSpp'), 'persp': bool(s.stage.GetPrimAtPath('/OmniverseKit_Persp')),\n"
+            "       'clamp_before': settings.get('/rtx/pathtracing/clampSpp'), 'configured_spp': s.app.config.get('samples_per_pixel_per_frame')}\n"
             "for name, arguments in (('test', (None, 64, 64, 2, None, None)),\n"
             "                        ('realtime', ('/World/Camera', 96, 64, 4, 'RealTimePathTracing', None)),\n"
             "                        ('pathtraced', ('/World/Camera', 96, 64, 4, 'PathTracing', 2))):\n"
@@ -2036,7 +2255,8 @@ def test_full_tier_rtx_path():
             "        out[name] = {'error': f'{type(error).__name__}: {error}'}\n"
             "    out[name]['seconds'] = round(time.perf_counter() - t0, 2)\n"
             "out.update(mode_after=settings.get('/rtx/rendermode'), spp_after=settings.get('/rtx/pathtracing/spp'),\n"
-            "           total_after=settings.get('/rtx/pathtracing/totalSpp'),\n"
+            "           total_after=settings.get('/rtx/pathtracing/totalSpp'), clamp_after=settings.get('/rtx/pathtracing/clampSpp'),\n"
+            "           log_megabytes=round(os.path.getsize(s.log_file) / 1e6, 1),\n"
             "           capture_on_play=settings.get('/omni/replicator/captureOnPlay'))\n"
             "for name, path in (('missing', '/World/NoSuchCamera'), ('not_a_camera', '/World/Cube')):\n"
             "    try:\n"
@@ -2049,10 +2269,14 @@ def test_full_tier_rtx_path():
             "out['saved'] = s.save(os.path.join(os.environ['NCNTM_TEST_OUT_DIR'], 'full_after_capture.usda'))\n"
             "out['new_errors'] = [line.split('[Error]')[1].strip()[:120] for line in s.kit_errors(200)][-6:]\n"
             "print('RESULT ' + json.dumps(out))", timeout=900)
+        compiled = kernel.run(warp_compile_cell(), timeout=900)            # the Warp ray caster must work next to the stock application
     finally:
         timing = kernel.shutdown()
     facts = result(started)
     kernel.timing["start_kit_s"] = facts["start_seconds"]
+    line = check_warp_compiled(compiled, "full")
+    if line:
+        print(line)
     assert facts["tier"] == "full" and facts["extensions"] > 100
     assert facts["args_from_kit"]
     for arg in kit.PRIVACY_ARGS:                                           # the stock application is the one that would send data
@@ -2064,10 +2288,15 @@ def test_full_tier_rtx_path():
     assert not any("omni.kit.renderer.init" in a for a in facts["args"])   # the renderer is NOT switched off: RTX must get its chance
 
     assert uploads_in(setup().root) == []                                  # the stock application sent nothing out
+    # the Kit folder can be listed and deleted: no folder in it that its owner may not enter
+    closed = [os.path.join(folder, name) for folder, names, _ in os.walk(setup().root) for name in names
+              if not os.access(os.path.join(folder, name), os.R_OK | os.X_OK)]
+    assert closed == [], closed
 
     state, shot, steps = result(status), result(capture), result(sequence)
-    print(f"tier full: {facts['extensions']} extensions, started in {facts['start_seconds']} s, {len(facts['errors'])} [Error] lines; "
-          f"Hydra engines {state['attached']}; renderer available: {state['available']} ({state['reason'][:160]})")
+    print(f"tier full: {facts['extensions']} extensions, started in {facts['start_seconds']} s, {len(facts['errors'])} [Error] lines, "
+          f"log {steps['log_megabytes']} MB; Hydra engines {state['attached']}; renderer available: {state['available']} "
+          f"({state['reason'][:160]})")
     print("tier full, capture sequence run directly: " + "; ".join(
         f"{name} {steps[name].get('shape', steps[name].get('error'))} in {steps[name]['seconds']} s" for name in ("test", "realtime", "pathtraced")))
     # the capture sequence ran through, whatever the renderer gave: every Replicator call in it exists in this Isaac Sim
@@ -2076,6 +2305,8 @@ def test_full_tier_rtx_path():
         assert steps[name]["seconds"] < 120.0, steps[name]                 # bounded: Replicator gives up after 1000 Kit frames
     assert steps["mode_after"] == steps["mode_before"]                     # the render settings it changed are put back
     assert steps["spp_after"] == steps["spp_before"] and steps["total_after"] == steps["total_before"]
+    assert steps["clamp_after"] == steps["clamp_before"]
+    assert steps["configured_spp"] == steps["spp_before"]                  # what capture_rtx(mode="PathTracing") uses without spp=
     assert steps["capture_on_play"] is False
     assert "no prim /World/NoSuchCamera" in steps["missing"] and "needs a Camera" in steps["not_a_camera"]
     # What ends up in the file the notebook saves, besides /World.  Kit's own viewport keeps a /Render scope in the

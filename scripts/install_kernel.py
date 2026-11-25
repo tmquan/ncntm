@@ -31,7 +31,9 @@ Environment written into the kernel spec
                                    a conda environment (which hides the NVIDIA graphics driver)
     LD_PRELOAD                     only with --preload, or on aarch64 if libgomp exists (Isaac Sim
                                    refuses to import without it there)
-    OMNI_KIT_ACCEPT_EULA=YES       only with --accept-eula
+    OMNI_KIT_ACCEPT_EULA=YES       only with --accept-eula.  Without it the script says what to do, unless this
+                                   Isaac Sim itself has the licence on record as accepted (a source build that
+                                   build.sh built: <repo>/.eula_accepted), which is all the kernel needs
     NCNTM_KIT_GPU=N                only with --gpu N: ncntm.viz.kit.start_kit() then restricts Isaac Sim and
                                    CUDA to GPU N (nvidia-smi index) unless the notebook passes gpu= itself
 Two properties of kernel.json decide how these are written: a value REPLACES the variable the
@@ -268,6 +270,35 @@ def find_isaac_python(explicit: str = None):
     return found
 
 
+def licence_marker(probe: dict) -> str:
+    """The file by which the Isaac Sim that answered ``probe`` itself records that the licence was accepted, if
+    that file is there ('' otherwise).  pip install: <package>/kit/EULA_ACCEPTED, first line "yes" (written by
+    Isaac Sim's own prompt).  Source build: <repo>/.eula_accepted (written by build.sh).  A binary build keeps
+    no record.  ncntm.viz.kit.start_kit looks at the same files."""
+    package = probe.get("isaacsim") or ""
+    if not package:
+        return ""
+    up = os.path.dirname
+    if package.split(os.sep)[-2:] != ["python_packages", "isaacsim"]:
+        path = os.path.join(package, "kit", "EULA_ACCEPTED")
+        try:
+            with open(path) as f:
+                return path if f.readline().strip().lower() in ("y", "yes", "1") else ""
+        except OSError:
+            return ""
+    repositories = []
+    if os.path.basename(up(up(package))) == "source":                    # <repo>/source/python_packages/isaacsim
+        repositories.append(up(up(up(package))))
+    for build in (probe.get("isaac_path") or "", up(up(probe.get("isaacsim_found_at") or ""))):
+        if build and os.path.basename(up(up(build))) == "_build":       # <repo>/_build/<platform>/<config>
+            repositories.append(up(up(up(build))))
+    for repository in repositories:
+        path = os.path.join(repository, ".eula_accepted")
+        if os.path.isfile(path):
+            return path
+    return ""
+
+
 def conda_prefix_of(folder: str) -> str:
     """The conda environment a folder lies in ('' if none): the nearest ancestor with conda-meta/."""
     folder = os.path.abspath(folder)
@@ -473,8 +504,13 @@ def main(argv=None) -> int:
             say("  (python.sh installs into Kit's Python; keep Isaac Sim's pins, e.g. add  numpy==2.3.1  to the command.)")
 
     if not args.accept_eula:
-        say(f"\nThe licence was NOT accepted for you: Isaac Sim will only start in this kernel after you have read {EULA_URL} "
-            f"and either re-run this script with --accept-eula or start Jupyter from a shell with {EULA_VARIABLE}=YES.")
+        marker = licence_marker(probe)
+        if marker:
+            say(f"\nThe licence: this Isaac Sim itself records it as accepted ({marker}), so the kernel needs no "
+                f"{EULA_VARIABLE}; nothing was written about it.")
+        else:
+            say(f"\nThe licence was NOT accepted for you: Isaac Sim will only start in this kernel after you have read {EULA_URL} "
+                f"and either re-run this script with --accept-eula or start Jupyter from a shell with {EULA_VARIABLE}=YES.")
     say("\n" + how_to_select(args.name, display_name, folder, args))
     return 0
 

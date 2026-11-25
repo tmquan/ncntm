@@ -1,7 +1,7 @@
 #!/usr/bin/env python
-"""Copy the teaching crops out of the nanoCosmos data tree into ./em_samples (numpy + h5py only, CPU, deterministic).
+"""Copy the teaching crops out of the source data tree into ./em_samples (numpy + h5py only, CPU, deterministic).
 
-    python make_em_samples.py [--data-root /home/nvidia/nanoCosmos/data] [--out ./em_samples] [--only snemi3d cremi_a fib25]
+    python make_em_samples.py --data-root DIR  (or $NCNTM_SOURCE_DATA_ROOT) [--out ./em_samples] [--only snemi3d cremi_a fib25]
 
 The data tree is opened read-only. One HDF5 per sample, axis order (z, y, x):
   /raw                    uint8, gzip 4            EM intensity, source values untouched
@@ -49,8 +49,8 @@ CROPS = json.loads(r"""[
   "tissue": "somatosensory cortex (S1)",
   "imaging_modality": "ssSEM (ATUM tape collection + SEM)",
   "citation": "Kasthuri, N. et al. (2015), Saturated Reconstruction of a Volume of Neocortex, Cell 162(3):648-661.",
-  "licence": "not stated in the local docs (nanoCosmos doc/DATASETS.md, scripts/download_*.py)",
-  "notes": "AC3_labels.h5 is not produced by any nanoCosmos script and its provenance is undocumented locally; it is aligned with the image (membranes are darker under label 0). Section brightness flickers strongly (per-section mean 110..207): normalise per section before volume rendering."
+  "licence": "not stated in the local docs (source-project doc/DATASETS.md, scripts/download_*.py)",
+  "notes": "AC3_labels.h5 is not produced by any source-project script and its provenance is undocumented locally; it is aligned with the image (membranes are darker under label 0). Section brightness flickers strongly (per-section mean 110..207): normalise per section before volume rendering."
  },
  {
   "name": "cremi_a",
@@ -85,7 +85,7 @@ CROPS = json.loads(r"""[
   "tissue": "brain",
   "imaging_modality": "ssTEM",
   "citation": "Funke, Saalfeld, Bock, Turaga, Perlman - CREMI Challenge, https://cremi.org/ ; FAFB: Zheng et al. 2018, Cell.",
-  "licence": "not stated in the local docs (nanoCosmos doc/DATASETS.md, scripts/download_*.py)",
+  "licence": "not stated in the local docs (source-project doc/DATASETS.md, scripts/download_*.py)",
   "notes": "Ids tile space (no zeros). Thousands of ids are specks of a few voxels: ids are size-ordered, so keep ids <= N for the large neurites. Almost every neurite runs across the sections (along z)."
  },
  {
@@ -121,7 +121,7 @@ CROPS = json.loads(r"""[
   "tissue": "optic lobe, medulla",
   "imaging_modality": "FIB-SEM",
   "citation": "Takemura, S. et al. (2015), PNAS 112(44):13711-13716, doi:10.1073/pnas.1509820112.",
-  "licence": "not stated in the local docs (nanoCosmos doc/DATASETS.md, scripts/download_*.py)",
+  "licence": "not stated in the local docs (source-project doc/DATASETS.md, scripts/download_*.py)",
   "notes": "Isotropic reference. raw[p::4] and instance[p::4] reproduce the 32x8x8 nm FIB253D twin exactly (see manifest 'derived'). The crop lies inside one 500-voxel block of the ground truth, so no label seam crosses it."
  },
  {
@@ -157,7 +157,7 @@ CROPS = json.loads(r"""[
   "tissue": "brain (FAFB)",
   "imaging_modality": "ssTEM",
   "citation": "FlyWire Consortium (2024), Whole-brain annotation and multi-connectome cell typing of Drosophila, Nature, doi:10.1038/s41586-024-07686-5; Dorkenwald et al. 2024, Nature.",
-  "licence": "not stated in the local docs (nanoCosmos doc/DATASETS.md, scripts/download_*.py)",
+  "licence": "not stated in the local docs (source-project doc/DATASETS.md, scripts/download_*.py)",
   "notes": "Labels are 16 nm data upsampled 2x in xy, so label edges move in 2-voxel steps in plane."
  },
  {
@@ -193,7 +193,7 @@ CROPS = json.loads(r"""[
   "tissue": "visual cortex (V1)",
   "imaging_modality": "ssTEM",
   "citation": "MICrONS Consortium (2025), Functional connectomics spanning multiple areas of mouse visual cortex, Nature (preprint bioRxiv 2021.07.28.454025).",
-  "licence": "not stated in the local docs (nanoCosmos doc/DATASETS.md, scripts/download_*.py)",
+  "licence": "not stated in the local docs (source-project doc/DATASETS.md, scripts/download_*.py)",
   "notes": "Original ids are 18-digit uint64 root ids: keep them as integers or strings, never as float or JSON numbers. Low native contrast: display with the intensity_norm window. The source files carry no HDF5 attributes; the voxel size comes from the docs."
  },
  {
@@ -227,9 +227,9 @@ CROPS = json.loads(r"""[
   "dataset_name": "H01 release (human cortex), EM mip 0 (4 nm), c3 segmentation (8 nm nearest-upsampled 2x in xy)",
   "species": "human (Homo sapiens)",
   "tissue": "temporal cortex",
-  "imaging_modality": "ssSEM (ATUM tape collection + multibeam SEM, per the H01 paper; the local nanoCosmos docs say ssTEM)",
+  "imaging_modality": "ssSEM (ATUM tape collection + multibeam SEM, per the H01 paper; the local source-project docs say ssTEM)",
   "citation": "Shapson-Coe et al. 2024, Science (A petavoxel fragment of human cerebral cortex reconstructed at nanoscale resolution).",
-  "licence": "CC-BY-4.0 (segmentation, as stated in scripts/download_h01cell.py); EM: not stated in the local docs (nanoCosmos doc/DATASETS.md, scripts/download_*.py)",
+  "licence": "CC-BY-4.0 (segmentation, as stated in scripts/download_h01cell.py); EM: not stated in the local docs (source-project doc/DATASETS.md, scripts/download_*.py)",
   "notes": "Half-size field of view (about 1.5 um). Stain is saturated (many 0 and 255 voxels). About a quarter of the voxels are unlabelled."
  },
  {
@@ -293,8 +293,8 @@ CROPS = json.loads(r"""[
   "tissue": "cultured cell",
   "imaging_modality": "FIB-SEM",
   "citation": "Xu et al. 2021, Nature; Heinrich et al. 2021, Nature.",
-  "licence": "not stated in the local docs (nanoCosmos doc/DATASETS.md, scripts/download_*.py)",
-  "notes": "Quarter-size field of view (0.768 um; the full 3.07 um cube would need 768^3 = 453 M voxels). On disk the z axis was resampled 3.24 -> 4 nm (trilinear) by nanoCosmos resample_cosem_isotropic.py, so 4 nm in z is a resampled grid, not the native sampling."
+  "licence": "not stated in the local docs (source-project doc/DATASETS.md, scripts/download_*.py)",
+  "notes": "Quarter-size field of view (0.768 um; the full 3.07 um cube would need 768^3 = 453 M voxels). On disk the z axis was resampled 3.24 -> 4 nm (trilinear) by the source project's resample_cosem_isotropic.py, so 4 nm in z is a resampled grid, not the native sampling."
  }
 ]""")
 
@@ -396,10 +396,13 @@ def write_sample(c, data_root, out_dir):
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--data-root", default="/home/nvidia/nanoCosmos/data")
+    ap.add_argument("--data-root", default=os.environ.get("NCNTM_SOURCE_DATA_ROOT"),
+                    help="root of the source data tree (default: $NCNTM_SOURCE_DATA_ROOT)")
     ap.add_argument("--out", default="./em_samples")
     ap.add_argument("--only", nargs="*", default=None, help="sample names; default: all")
     args = ap.parse_args()
+    if not args.data_root:
+        ap.error("--data-root is required (or set NCNTM_SOURCE_DATA_ROOT)")
     os.makedirs(args.out, exist_ok=True)
     total, rows = 0, []
     for c in CROPS:

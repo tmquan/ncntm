@@ -1,4 +1,4 @@
-"""Dense prediction head used by the Cosmos 3 decoder.
+"""Dense prediction head shared by the backbone wrappers.
 
 Two residual 3-D blocks refine the decoder feature map at a shared width,
 then a 1×1 convolution projects to the affinity + sem + raw head. The
@@ -17,14 +17,14 @@ try:
     from monai.networks.blocks import UnetrBasicBlock
 except ImportError as exc:  # pragma: no cover - monai is a hard dep
     raise ImportError(
-        "The Cosmos 3 task head requires MONAI "
+        "The task head requires MONAI "
         "(monai.networks.blocks.UnetrBasicBlock). "
         "Install with `pip install monai>=1.3`."
     ) from exc
 
 
 class TaskHead3D(nn.Module):
-    """Residual dense-prediction head on top of the Cosmos 3 decoder.
+    """Residual dense-prediction head on top of the fused backbone features.
 
     Architecture::
 
@@ -40,11 +40,11 @@ class TaskHead3D(nn.Module):
 
     Args:
         in_channels: Channel count of the decoder feature map.
-        out_channels: Task output width. Cosmos 3 wrappers use
+        out_channels: Task output width. Wrappers use
             ``HEAD_CHANNELS`` (affinity + sem + raw).
         refine_channels: Width of the residual blocks. Defaults to
             ``in_channels``. The decoder passes ``feature_size`` so the
-            cost stays independent of the VAE decoder width.
+            cost stays independent of the backbone width.
         dropout: Channel-wise dropout just before the final 1×1.
         norm_name: Normalisation inside the residual blocks.
     """

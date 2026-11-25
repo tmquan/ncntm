@@ -1,5 +1,5 @@
-"""Cosmos 3 backbone wrappers."""
+"""Backbone wrappers."""
 
-from ncntm.models.cosmos_3_edge import Cosmos3EdgeWrapper
+from ncntm.models.voxeldit2 import VoxelDiT2Wrapper3D
 
-__all__ = ["Cosmos3EdgeWrapper"]
+__all__ = ["VoxelDiT2Wrapper3D"]

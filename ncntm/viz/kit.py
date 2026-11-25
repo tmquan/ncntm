@@ -29,6 +29,10 @@ Tiers
              otherwise "usd"; "off" when Isaac Sim is not installed.  The environment variable
              NCNTM_KIT (off | usd | core | full) overrides the probe; an explicit ``tier``
              argument overrides both.
+Which Warp ``import warp`` gives afterwards depends on the tier (``session.warp_version``): in
+"off" and "usd" the interpreter's own (1.19.0 in the pip install; a source build has none
+unless one is installed into it), in "core" and "full" the one Kit ships (1.17.0).  The Warp
+ray caster of this package (ncntm.viz.emray) must therefore run with both.
 
 What start_kit takes care of (each line is a failure that was measured with Isaac Sim 6.2.0
 inside a Jupyter kernel; do not remove one without measuring again)
@@ -55,6 +59,9 @@ inside a Jupyter kernel; do not remove one without measuring again)
     * the experience files: apps/*.kit are ignored by the repository (.gitignore has *.kit),
       so a clone does not have them.  Their text is kept in this module as well; a missing
       file is written to DIR/apps and used from there.
+    * a folder nobody may list: the stock application creates
+      DIR/data/documents/Kit/shared/screenshots with mode 000, at which ``rm -r`` and ``du``
+      give up.  start_kit gives the owner access to it.
     * print(): Kit replaces sys.stdout unless --/app/python/interceptSysStdOutput=false.
     * crash reporter and telemetry: stock Kit uploads crash dumps and usage events.  Every
       start passes PRIVACY_ARGS, excludes the telemetry extension and does not load the crash
@@ -67,8 +74,10 @@ inside a Jupyter kernel; do not remove one without measuring again)
       session instead.
     * SimulationApp.close() deadlocks inside a kernel: ``session.close()`` only explains.
     * leaving: Kit's own teardown at interpreter exit crashes or outlives Jupyter's grace
-      period.  An exit hook flushes open files, closes h5py files, shuts logging down and
-      then leaves with os._exit.  RLIMIT_CORE is set to 0 so that a crash leaves no core file.
+      period.  An exit hook flushes open files, closes h5py files, shuts logging down,
+      removes the folders of tempfile.TemporaryDirectory objects (Warp keeps a 70 MB
+      precompiled header in one) and then leaves with os._exit.  RLIMIT_CORE is set to 0 so
+      that a crash leaves no core file.
     * Ctrl-C / "interrupt" while Kit starts leaves a half-initialised application.  The
       interrupt is held back until the start has finished; if a start fails anyway the
       session is marked tainted and start_kit asks for a kernel restart.
@@ -80,7 +89,7 @@ inside a Jupyter kernel; do not remove one without measuring again)
 Not done here on purpose: nothing is saved at kernel exit (call ``session.save``), and atexit
 handlers registered before start_kit do not run (the exit hook leaves the process first).
 Nothing prunes the Kit folder either: every start leaves one log in DIR/logs (about 0.2 MB in
-tier "usd", 0.3 MB in "core", a few MB in "full") and an empty carb.* folder in DIR/tmp;
+tier "usd", 0.3 MB in "core", 1.3 MB in "full") and an empty carb.* folder in DIR/tmp;
 delete DIR whenever no kernel is running.  Two kernels may share DIR; if they start within the
 same second they also share the log file, and ``session.kit_errors()`` then counts both.
 Tier "off" changes nothing about how the process ends; inside a kernel it only sets the soft
@@ -740,12 +749,50 @@ def flush_open_files() -> int:
     return handled
 
 
+def _open_closed_folders(root: str) -> int:
+    """Give the owner access to folders of the Kit folder that have none; returns how many.
+
+    Measured: the stock application creates <root>/data/documents/Kit/shared/screenshots with
+    mode 000.  Not even its owner can list it, so ``du``, ``rm -r`` and shutil.rmtree stop
+    there and the Kit folder cannot be deleted."""
+    opened = 0
+    for folder, names, _ in os.walk(os.path.join(root, "data", "documents"), onerror=lambda error: None):
+        for name in names:
+            path = os.path.join(folder, name)
+            try:
+                if not os.path.islink(path) and not os.access(path, os.R_OK | os.W_OK | os.X_OK):
+                    os.chmod(path, 0o700)
+                    opened += 1
+            except OSError:
+                pass
+    return opened
+
+
+def _remove_temporary_directories() -> int:
+    """Remove the folders that ``tempfile.TemporaryDirectory`` objects still hold; returns how
+    many.  An ordinary interpreter exit does this through their finalizers, os._exit does not.
+    Measured: Warp keeps the precompiled header of its kernel compiler in one (wp_pch_*,
+    70 MB), and every kernel that had compiled a Warp kernel left that folder in /tmp.
+    Only for the moment the process ends: the folders are in use until then."""
+    import gc
+    removed = 0
+    for obj in gc.get_objects():
+        try:
+            if isinstance(obj, tempfile.TemporaryDirectory):
+                obj.cleanup()
+                removed += 1
+        except Exception:
+            pass
+    return removed
+
+
 def _exit_hook() -> None:
     """atexit: save what Python holds in buffers, then leave WITHOUT Kit's teardown.
 
     Kit's own shutdown at interpreter exit crashes (SIGSEGV) or takes longer than the five
     seconds Jupyter waits before it kills the kernel.  A bare os._exit loses unflushed files
-    (measured: an open text file was 0 bytes, an open HDF5 file unreadable), hence the flush.
+    (measured: an open text file was 0 bytes, an open HDF5 file unreadable), hence the flush,
+    and leaves temporary folders behind, hence their removal.
     Exit status: 0 in a kernel.  In a plain script: the code given to sys.exit(), 1 after an
     uncaught exception, else 0 (``raise SystemExit(n)`` cannot be seen from here)."""
     state = _state()
@@ -759,6 +806,10 @@ def _exit_hook() -> None:
         elif getattr(sys, "last_exc", None) is not None or getattr(sys, "last_value", None) is not None:
             code = 1
     flush_open_files()
+    _remove_temporary_directories()
+    session = state.get("session")
+    if session is not None and getattr(session, "root", ""):
+        _open_closed_folders(session.root)
     os._exit(code)
 
 
@@ -1815,6 +1866,7 @@ def start_kit(tier: str = "auto", gpu=None, root=None, quiet: bool = True, *, li
     except BaseException as e:              # Kit runs, but nothing holds it: a second start would replace the stage
         state["tainted"] = f"Kit started, but the session could not be set up ({type(e).__name__}: {e})"
         raise
+    _open_closed_folders(root)              # the stock application makes a folder nobody may list
     if info["interrupted"]:
         raise KeyboardInterrupt("interrupt received while Kit was starting. The start was completed first, so Kit is "
                                 "intact: run the cell again to get the session.")

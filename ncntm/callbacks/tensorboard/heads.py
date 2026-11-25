@@ -116,7 +116,7 @@ def _log_predictions(
     * ``true/sem``  -- ground-truth foreground target the sem head is trained
       on (``sem_labels > 0`` when a boundary-eroded ``sem_label`` is supplied,
       else the instance ``labels > 0``)
-    * ``true/wan_decoder`` (Cosmos + VAE only, passed in)
+    * ``true/wan_decoder`` (VAE-based backbones only, passed in)
     * ``pred/sem``  -- foreground probability
     * ``pred/raw``  -- linear reconstruction
     * ``pred/label/pre`` / ``pred/label/mul`` -- Mutex Watershed instances

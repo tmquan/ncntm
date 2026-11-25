@@ -5,7 +5,7 @@
 #
 # This is the *frozen* version of every package needed to reproduce the
 # CUDA-13.4 / Python-3.15 development environment: the core runtime, the
-# Cosmos backbone, the GPU (RAPIDS) extras, the optional visualizer, and
+# VoxelDiT2-3D backbone, the GPU (RAPIDS) extras, the optional visualizer, and
 # the dev/test tooling.  Install with ``pip install -r requirements_rb.txt``.
 
 # Core deep learning
@@ -72,22 +72,14 @@ fastapi==0.165.0
 uvicorn==0.54.0
 pydantic==2.14.4
 
-# Cosmos 3 backbones (Nano 16B, Edge 4B, Super 64B).
-#
-# diffusers 0.43.0 ships ``Cosmos3OmniTransformer`` and reads Cosmos3-Edge's
-# config flags (``hidden_act: relu2`` / ``qk_norm_for_text: false``), so the
-# released ``nvidia/Cosmos3-Edge`` checkpoint loads directly.  Changing diffusers /
-# transformers / safetensors can change how HF weights deserialize via
-# ``from_pretrained``; re-verify pretrained-weight loading after any bump.
-diffusers==0.43.0
-# Cosmos 3 is an omni model: the pipeline pulls a Qwen3-VL vision encoder +
-# Qwen2 tokenizer from transformers, so it is a hard dependency.
-# transformers and accelerate are NOT imported directly by the package; they
-# are pulled in transitively by diffusers.  Pinned to the resolved versions.
-transformers==5.24.0
+# VoxelDiT2-3D backbone (ncntm.models.voxeldit2).  timm builds the frozen
+# DINOv3 grounding encoder (vit_small_patch16_dinov3_qkvb.lvd1689m) and
+# downloads its weights on first use; the 2-D ``nvidia/PixelDiT2-ImageNet``
+# checkpoint is fetched through huggingface_hub.
+timm==1.0.31
+
 huggingface_hub==2.4.0
 safetensors==0.8.0
-accelerate==1.16.0
 
 # HTTP / networking
 charset-normalizer==3.5.3
