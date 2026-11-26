@@ -78,7 +78,12 @@ class PromptEncoder:
         self._load()
         batch = self._tokenizer(list(prompts), return_tensors="pt", padding=True)
         batch = {k: v.to(device) for k, v in batch.items()}
-        hidden = self._model(**batch).last_hidden_state.float()
+        # Runs only for new prompts: borrow the device, then give the memory back.
+        self._model.to(device)
+        try:
+            hidden = self._model(**batch).last_hidden_state.float()
+        finally:
+            self._model.to("cpu")
         mask = batch["attention_mask"].unsqueeze(-1).float()
         return (hidden * mask).sum(dim=1) / mask.sum(dim=1).clamp_min(1.0)
 

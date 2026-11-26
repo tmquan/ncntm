@@ -38,7 +38,8 @@ under ``{stage}/{mode}/{ssl,sft}/{SNEMI3D,MICRONS}/...``:
       {stage}/automatic/sft/pred/sem/{xy,xz,yz}     foreground (sigmoid)
       {stage}/automatic/sft/pred/label/{xy,xz,yz}   Mutex-Watershed instances
       {stage}/automatic/sft/pred/aff/{offset}  12 curated affinity channels
-                                              (5 pull + 7 push), xy slice only
+                                              (3 pull + 9 push: -2, -4, -8 along
+                                              z, y, x), xy slice only
 
 The ``ssl`` branch is label-free, so it shows only the reconstruction panels.
 Both branches also log the ``volume`` and ``prompt`` text cards.
@@ -69,6 +70,22 @@ def _gray3(panel_2d: torch.Tensor) -> torch.Tensor:
     if panel_2d.dim() == 3:
         panel_2d = panel_2d.unsqueeze(1)
     return repeat(_normalise(panel_2d.float()), "b 1 h w -> b 3 h w")
+
+
+_CURATED_PUSH_DISTANCES = (2, 4, 8)
+
+
+def _curated_aff_indices(offsets, n_pull: int) -> list:
+    """All pull offsets, then push offsets with one non-zero axis at distance 2/4/8."""
+    keep = list(range(min(n_pull, len(offsets))))
+    for i, off in enumerate(offsets):
+        if i < n_pull:
+            continue
+        vec = [int(v) for v in off]
+        nz = [v for v in vec if v != 0]
+        if len(nz) == 1 and abs(nz[0]) in _CURATED_PUSH_DISTANCES:
+            keep.append(i)
+    return keep
 
 
 def _prompt_kw(batch, i: int) -> dict:
@@ -493,9 +510,10 @@ class Joint3DImageLogger(ImageLogger):
         aff = pooled[:, crit.aff_slice].sigmoid().float()
         names = offset_names(offsets, n_pull)
         mask_2d = torch.ones_like(_to_2d(aff[:, :1], frac_z))
-        # Every pull offset, plus up to max_push=7 evenly spaced push offsets.
+        # Pull offsets plus the single-axis push offsets at distances 2, 4, 8:
+        # 12 panels, a multiple of 3 for the TensorBoard grid.
         _add_aff_panels(
-            tb, ctx, aff, aff_panel_indices(len(offsets), n_pull, max_push=7),
+            tb, ctx, aff, _curated_aff_indices(offsets, n_pull),
             names=names, mask_2d=mask_2d, epoch=epoch, tag_prefix="pred/aff",
             size=target_hw, frac=frac_z,
         )
