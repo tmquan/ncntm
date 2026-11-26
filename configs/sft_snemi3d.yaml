@@ -89,8 +89,9 @@ data:
   branches:
     sft:
       task: sft
-      # A labeled anisotropic (30x6x6) group runs at batch size 1: the label
-      # stays on the native grid (see ncntm.datamodules.joint3d).
+      # The label stays on the native grid, so under rand_transpose_zyx every
+      # sample of a batch shares one z/y/x permutation (a different one per
+      # batch) and the labels stack (see ncntm.datamodules.joint3d).
       batch_size: 4
       sample_weight: 1.0
       volumes:

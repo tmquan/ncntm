@@ -5,14 +5,15 @@
 ``ssl`` batch AND the first ``sft`` batch and renders BOTH, each under a
 task-namespaced tag ``{stage}/{mode}/{task}/...``.  On validation, once a
 SNEMI or MICRONS batch has been seen, those crops replace the first-batch
-panels.  The logged plane is the slice with the strongest membrane texture,
-under ``{stage}/{mode}/ssl/{SNEMI3D,MICRONS}/...``:
+panels.  Their planes are the slices with the strongest membrane texture,
+under ``{stage}/{mode}/{ssl,sft}/{SNEMI3D,MICRONS}/...``:
 
 * **both branches** -- reconstruction panels, each as the three orthogonal
-  mid-planes (``xy`` / ``xz`` / ``yz``) on the 4 nm grid only.  A source or
-  target that is coarser than 4 nm is nearest-upsampled onto that grid
-  before the plane is drawn.  That resample is display only; the L1 stays
-  on the native crop::
+  planes (``xy`` / ``xz`` / ``yz``) on the 4 nm grid only: the mid-planes,
+  or the texture-picked planes on textured validation.  A source or target
+  that is coarser than 4 nm is nearest-upsampled onto that grid before the
+  plane is drawn.  That resample is display only; the L1 stays on the
+  native crop::
 
       {stage}/automatic/{ssl,sft}/true/image/{xy,xz,yz}    source (degraded on ssl)
       {stage}/automatic/{ssl,sft}/pred/recon/{xy,xz,yz}  raw head on the degraded latent
@@ -32,13 +33,15 @@ under ``{stage}/{mode}/ssl/{SNEMI3D,MICRONS}/...``:
 * **sft only** -- the fine head is pooled to the native label grid (matching
   the loss) and the usual segmentation panels are emitted::
 
-      {stage}/automatic/sft/true/label        native instance labels
-      {stage}/automatic/sft/true/sem          sem target (eroded sem_label > 0)
-      {stage}/automatic/sft/pred/sem          foreground (sigmoid)
-      {stage}/automatic/sft/pred/label        Mutex-Watershed instances
-      {stage}/automatic/sft/aff/pred/{offset} a few affinity channels
+      {stage}/automatic/sft/true/label/{xy,xz,yz}   native instance labels
+      {stage}/automatic/sft/true/sem/{xy,xz,yz}     sem target (eroded sem_label > 0)
+      {stage}/automatic/sft/pred/sem/{xy,xz,yz}     foreground (sigmoid)
+      {stage}/automatic/sft/pred/label/{xy,xz,yz}   Mutex-Watershed instances
+      {stage}/automatic/sft/pred/aff/{offset}  12 curated affinity channels
+                                              (5 pull + 7 push), xy slice only
 
 The ``ssl`` branch is label-free, so it shows only the reconstruction panels.
+Both branches also log the ``volume`` and ``prompt`` text cards.
 """
 
 from typing import Any, Dict
@@ -70,6 +73,7 @@ def _gray3(panel_2d: torch.Tensor) -> torch.Tensor:
 
 def _log_ortho_planes(
     tb, ctx, epoch: int, tag: str, vol: torch.Tensor, fine_size, fracs=None,
+    *, colour: bool = False,
 ) -> None:
     """Log the xy / xz / yz planes of ``vol`` on the 4 nm ``fine_size`` grid.
 
@@ -79,15 +83,22 @@ def _log_ortho_planes(
     (the Wan decoder's unpatchified RGB) are averaged to one grayscale plane
     before the contrast stretch.  That mean is only a display of an image; a
     packed 12-channel ``conv_out`` has to be unpatchified first.
+
+    ``colour=True`` treats ``vol`` (single channel) as integer instance ids and
+    draws each plane with the instance palette instead of grayscale.
     """
     planes = (
         _orthogonal_texture_planes(vol, fine_size, fracs)
         if fracs is not None else _orthogonal_midplanes(vol, fine_size)
     )
     for name, plane in planes.items():
-        if plane.shape[1] != 1:
-            plane = plane.mean(dim=1, keepdim=True)
-        tb.add_images(ctx.tag(f"{tag}/{name}"), _gray3(plane), global_step=epoch)
+        if colour:
+            rgb = _label_to_rgb(plane[:, 0].round().long())
+        else:
+            if plane.shape[1] != 1:
+                plane = plane.mean(dim=1, keepdim=True)
+            rgb = _gray3(plane)
+        tb.add_images(ctx.tag(f"{tag}/{name}"), rgb, global_step=epoch)
 
 
 class Joint3DImageLogger(ImageLogger):
@@ -353,6 +364,7 @@ class Joint3DImageLogger(ImageLogger):
         if task == "sft" and "label" in batch:
             self._log_seg_panels(
                 tb, ctx, pl_module, head, batch, n, target_hw, frac_z=frac_z,
+                fine_size=fine_size, fracs=fracs,
             )
 
     def _per_z_foreground(self, batch, key, pl_module, n):
@@ -406,6 +418,7 @@ class Joint3DImageLogger(ImageLogger):
 
     def _log_seg_panels(
         self, tb, ctx, pl_module, head, batch, n, target_hw=None, frac_z=None,
+        *, fine_size=None, fracs=None,
     ):
         epoch = pl_module.current_epoch
         crit = pl_module.criterion
@@ -418,16 +431,23 @@ class Joint3DImageLogger(ImageLogger):
         pooled = crit._pool_to(head[:n], labels.shape[-3:])
 
         # True instance labels.  (nearest upsample -> no label-colour blending.)
-        labels_2d = rearrange(
-            _to_2d(rearrange(labels, "b ... -> b 1 ..."), frac_z),
-            "b 1 ... -> b ...",
-        )
-        tb.add_images(
-            ctx.tag("true/label"),
-            _resize_2d(_label_to_rgb(labels_2d.long()), target_hw, mode="nearest")
-            if target_hw else _label_to_rgb(labels_2d.long()),
-            global_step=epoch,
-        )
+        ortho = fine_size is not None
+        if ortho:
+            _log_ortho_planes(
+                tb, ctx, epoch, "true/label", labels.unsqueeze(1).float(),
+                fine_size, fracs, colour=True,
+            )
+        else:
+            labels_2d = rearrange(
+                _to_2d(rearrange(labels, "b ... -> b 1 ..."), frac_z),
+                "b 1 ... -> b ...",
+            )
+            tb.add_images(
+                ctx.tag("true/label"),
+                _resize_2d(_label_to_rgb(labels_2d.long()), target_hw, mode="nearest")
+                if target_hw else _label_to_rgb(labels_2d.long()),
+                global_step=epoch,
+            )
 
         # Ground-truth foreground the sem head is trained on.  Uses the eroded
         # ``sem_label`` (boundary_target: semantic) when present so the panel
@@ -442,17 +462,20 @@ class Joint3DImageLogger(ImageLogger):
         else:
             sem_src = labels
         gt_sem = rearrange((sem_src > 0).float(), "b ... -> b 1 ...")
-        gt_sem_panel = _gray3(_to_2d(gt_sem, frac_z))
-        if target_hw:
-            gt_sem_panel = _resize_2d(gt_sem_panel, target_hw)
-        tb.add_images(ctx.tag("true/sem"), gt_sem_panel, global_step=epoch)
-
         # Foreground (sem) prediction.
         sem = pooled[:, crit.sem_slice].sigmoid()
-        sem_panel = _gray3(_to_2d(sem, frac_z))
-        if target_hw:
-            sem_panel = _resize_2d(sem_panel, target_hw)
-        tb.add_images(ctx.tag("pred/sem"), sem_panel, global_step=epoch)
+        if ortho:
+            _log_ortho_planes(tb, ctx, epoch, "true/sem", gt_sem.float(), fine_size, fracs)
+            _log_ortho_planes(tb, ctx, epoch, "pred/sem", sem.float(), fine_size, fracs)
+        else:
+            gt_sem_panel = _gray3(_to_2d(gt_sem, frac_z))
+            if target_hw:
+                gt_sem_panel = _resize_2d(gt_sem_panel, target_hw)
+            tb.add_images(ctx.tag("true/sem"), gt_sem_panel, global_step=epoch)
+            sem_panel = _gray3(_to_2d(sem, frac_z))
+            if target_hw:
+                sem_panel = _resize_2d(sem_panel, target_hw)
+            tb.add_images(ctx.tag("pred/sem"), sem_panel, global_step=epoch)
 
         # Affinity channels (curated subset) + Mutex-Watershed instances.
         agg = getattr(pl_module, "agglomerator", None)
@@ -464,7 +487,7 @@ class Joint3DImageLogger(ImageLogger):
         # Every pull offset, plus up to max_push=7 evenly spaced push offsets.
         _add_aff_panels(
             tb, ctx, aff, aff_panel_indices(len(offsets), n_pull, max_push=7),
-            names=names, mask_2d=mask_2d, epoch=epoch, tag_prefix="aff/pred",
+            names=names, mask_2d=mask_2d, epoch=epoch, tag_prefix="pred/aff",
             size=target_hw, frac=frac_z,
         )
 
@@ -475,14 +498,20 @@ class Joint3DImageLogger(ImageLogger):
             else:
                 sem_fg = None
             seg_3d = agg(aff, sem_fg)
-            seg_2d = rearrange(
-                _to_2d(rearrange(seg_3d, "b ... -> b 1 ..."), frac_z),
-                "b 1 ... -> b ...",
-            )
-            seg_rgb = _label_to_rgb(seg_2d.long())
-            if target_hw:
-                seg_rgb = _resize_2d(seg_rgb, target_hw, mode="nearest")
-            tb.add_images(ctx.tag("pred/label"), seg_rgb, global_step=epoch)
+            if ortho:
+                _log_ortho_planes(
+                    tb, ctx, epoch, "pred/label", seg_3d.unsqueeze(1).float(),
+                    fine_size, fracs, colour=True,
+                )
+            else:
+                seg_2d = rearrange(
+                    _to_2d(rearrange(seg_3d, "b ... -> b 1 ..."), frac_z),
+                    "b 1 ... -> b ...",
+                )
+                seg_rgb = _label_to_rgb(seg_2d.long())
+                if target_hw:
+                    seg_rgb = _resize_2d(seg_rgb, target_hw, mode="nearest")
+                tb.add_images(ctx.tag("pred/label"), seg_rgb, global_step=epoch)
 
     @staticmethod
     def _resolve_task(task: Any) -> str:

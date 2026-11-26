@@ -39,6 +39,13 @@ _ZYX_PERMS: Tuple[Tuple[int, int, int], ...] = (
     (2, 1, 0),
 )
 
+# Sample key that forces permutation ``_ZYX_PERMS[i]`` instead of a random draw.
+# The batch sampler sets it so every sample of one batch shares an orientation
+# (see ``Joint3DDataModule``); the transform pops it before collation.
+ZYX_PERM_KEY = "zyx_perm"
+N_ZYX_PERMS = len(_ZYX_PERMS)
+
+
 def _permute_spatial(val, perm: Tuple[int, int, int]):
     """Permute the last three axes of a tensor or ndarray.  ``perm[i]`` is the
     old spatial axis that becomes new spatial axis ``i``."""
@@ -65,6 +72,11 @@ class RandTransposeZYXd(MapTransform, Randomizable):
         native_resolution: Voxel size ``(z, y, x)`` nm of those arrays **before**
             permutation.
         allow_missing_keys: Skip keys that are absent from the sample.
+
+    A sample that carries ``ZYX_PERM_KEY`` (an index into the six axis orders)
+    uses that permutation and the key is removed; otherwise one is drawn at
+    random.  Labels stay on the native grid, so a labeled anisotropic batch only
+    stacks when all of its samples share one permutation.
     """
 
     def __init__(
@@ -86,13 +98,17 @@ class RandTransposeZYXd(MapTransform, Randomizable):
         self._perm = _ZYX_PERMS[int(self.R.randint(0, len(_ZYX_PERMS)))]
 
     def __call__(self, data: Dict) -> Dict:
-        self.randomize()
         d = dict(data)
-        perm = self._perm
+        forced = d.pop(ZYX_PERM_KEY, None)
+        if forced is None:
+            self.randomize()
+            perm = self._perm
+        else:
+            perm = _ZYX_PERMS[int(forced)]
         if perm != (0, 1, 2):
             for key in self.key_iterator(d):
                 d[key] = _permute_spatial(d[key], perm)
         return d
 
 
-__all__ = ["RandTransposeZYXd"]
+__all__ = ["RandTransposeZYXd", "ZYX_PERM_KEY", "N_ZYX_PERMS"]

@@ -746,6 +746,16 @@ class LazyVolDataset(Dataset):
         return nz_frac >= self.image_min_foreground, None, image, nz_frac
 
     def __getitem__(self, index: int) -> Dict[str, Any]:
+        return self.fetch(index)
+
+    def fetch(self, index: int, zyx_perm: Optional[int] = None) -> Dict[str, Any]:
+        """Read one sample.
+
+        ``zyx_perm`` (an index into the six z/y/x axis orders) is handed to
+        :class:`~ncntm.transforms.RandTransposeZYXd` through the sample, so the
+        batch sampler can give every sample of a batch the same orientation.
+        ``None`` leaves the permutation to the transform's own random draw.
+        """
         seed = index if self.deterministic else index + int(torch.randint(0, 2**31, (1,)).item())
         rng = np.random.RandomState(seed)
         handle = self._pick_volume(index)
@@ -817,6 +827,9 @@ class LazyVolDataset(Dataset):
                     handle.label_path, full_slices, handle.label_key, dtype=np.int64,
                 )
             sample["label"] = label
+
+        if zyx_perm is not None:
+            sample["zyx_perm"] = int(zyx_perm)
 
         if self.transform is not None:
             # Validation reseeds the whole Compose from the sample index, so

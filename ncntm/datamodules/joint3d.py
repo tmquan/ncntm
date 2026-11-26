@@ -49,10 +49,12 @@ so a batch drawn from one group is **task-homogeneous** and, with
 ``Joint3DReconSegLoss`` / ``Joint3DModule`` require.  The ssl recon target
 is nearest-upsampled onto the cubic fine grid before collation, so an
 anisotropic ssl group keeps its branch batch size under
-``rand_transpose_zyx``.  A labeled anisotropic group still drops to
-``batch_size`` 1 (an INFO log records the configured size), because the
-label stays on the native grid.  Isotropic groups always keep the branch
-batch size.  A round-robin batch sampler draws one group
+``rand_transpose_zyx``.  A labeled anisotropic group keeps it too, but the
+label stays on the native grid, so a permutation changes its shape.  The
+sampler therefore draws ONE permutation per batch and every sample of that
+batch uses it (an INFO log notes the group); the labels then stack.  A
+batch of one is unaffected.  Isotropic groups always keep the branch batch
+size.  A round-robin batch sampler draws one group
 per batch.  Training seeds ``seed + epoch + 100003 * rank``, so rank 0
 keeps the historical sequence and the other ranks draw different groups
 in the same step.  Validation seeds ``seed + epoch`` on every rank and
@@ -75,8 +77,8 @@ Config schema (``cfg.data``)::
     rand_transpose_zyx: true         # train-only random z/y/x permutation.
                                      #   ssl keeps batch_size (recon is
                                      #   nearest-upsampled before collation).
-                                     #   A labeled anisotropic group runs at
-                                     #   batch_size 1 (INFO log).
+                                     #   A labeled anisotropic group shares one
+                                     #   permutation per batch so labels stack.
     degrade: {zf_range: [...], ...}  # RandResolutionDegraded kwargs (ssl)
     sft_min_foreground: 0.8          # sft gate: BOTH label fg AND image non-zero
     ssl_min_foreground: 0.8          # image non-zero gate (ssl volumes)
@@ -111,6 +113,7 @@ Config schema (``cfg.data``)::
 
 from __future__ import annotations
 
+import bisect
 import logging
 import math
 import random
@@ -130,6 +133,7 @@ from torch.utils.data import ConcatDataset, DataLoader, Sampler
 
 from ncntm.datamodules._worker import worker_init
 from ncntm.datasets.lazy import LazyVolDataset
+from ncntm.transforms.rand_transpose_zyx import N_ZYX_PERMS
 from ncntm.transforms import (
     FindBoundariesd,
     Labeld,
@@ -215,18 +219,29 @@ class _RoundRobinBatchSampler(Sampler):
     therefore walks the historical sequence. ``__len__`` ignores rank.
     Validation (``shard=True``) builds that same rank-0 schedule, then keeps
     batch ``k`` on rank ``k % world_size``.
+
+    A group may set ``shared_perm`` (4th field).  Its batches then draw ONE
+    z/y/x permutation and tag every index with it as ``(index, perm)``, which
+    :class:`_PermConcatDataset` forwards to the transform.  That is how a
+    labeled anisotropic group, whose label stays on the native grid, keeps a
+    batch size above 1 under ``rand_transpose_zyx``: every label in the batch
+    has the same permuted shape.
     """
 
     def __init__(
         self,
-        groups: List[Tuple[int, int, int]],   # (offset, length, batch_size)
+        # (offset, length, batch_size[, shared_perm])
+        groups: List[Tuple[int, ...]],
         shuffle: bool,
         seed: int = 0,
         rank: int = 0,
         world_size: int = 1,
         shard: bool = False,
     ) -> None:
-        self.groups = groups
+        self.groups = [
+            (int(g[0]), int(g[1]), int(g[2]), bool(g[3]) if len(g) > 3 else False)
+            for g in groups
+        ]
         self.shuffle = shuffle
         self.seed = int(seed)
         self.rank = int(rank)
@@ -235,7 +250,7 @@ class _RoundRobinBatchSampler(Sampler):
         self._epoch = 0
 
     def _full_len(self) -> int:
-        return sum(length // bs for _, length, bs in self.groups if bs > 0)
+        return sum(length // bs for _, length, bs, _s in self.groups if bs > 0)
 
     def __len__(self) -> int:
         n = self._full_len()
@@ -253,15 +268,20 @@ class _RoundRobinBatchSampler(Sampler):
         else:
             rng = random.Random(self.seed + epoch + 100003 * self.rank)
         schedule: List[int] = []
-        for gi, (_off, length, bs) in enumerate(self.groups):
+        for gi, (_off, length, bs, _shared) in enumerate(self.groups):
             schedule += [gi] * (length // bs)
         if self.shuffle:
             rng.shuffle(schedule)
         cursors = [0] * len(self.groups)
         batches: List[List[int]] = []
         for gi in schedule:
-            off, length, bs = self.groups[gi]
-            if self.shuffle:
+            off, length, bs, shared = self.groups[gi]
+            if self.shuffle and shared:
+                perm = rng.randrange(N_ZYX_PERMS)
+                batches.append(
+                    [(off + rng.randrange(length), perm) for _ in range(bs)]
+                )
+            elif self.shuffle:
                 batches.append([off + rng.randrange(length) for _ in range(bs)])
             else:
                 c = cursors[gi]
@@ -270,6 +290,27 @@ class _RoundRobinBatchSampler(Sampler):
         if self.shard and self.world_size > 1:
             batches = [b for k, b in enumerate(batches) if k % self.world_size == self.rank]
         yield from batches
+
+
+class _PermConcatDataset(ConcatDataset):
+    """:class:`ConcatDataset` that also takes ``(index, zyx_perm)`` indices.
+
+    The sampler tags the indices of a ``shared_perm`` batch with one
+    permutation id; it is passed to ``LazyVolDataset.fetch`` so the whole batch
+    shares an orientation.  A plain integer index behaves as in ``ConcatDataset``.
+    """
+
+    def __getitem__(self, idx):
+        if not isinstance(idx, tuple):
+            return super().__getitem__(idx)
+        idx, perm = idx
+        if idx < 0:
+            if -idx > len(self):
+                raise ValueError("absolute value of index should not exceed dataset length")
+            idx = len(self) + idx
+        d = bisect.bisect_right(self.cumulative_sizes, idx)
+        sample = idx if d == 0 else idx - self.cumulative_sizes[d - 1]
+        return self.datasets[d].fetch(sample, zyx_perm=perm)
 
 
 class Joint3DDataModule(pl.LightningDataModule):
@@ -433,8 +474,8 @@ class Joint3DDataModule(pl.LightningDataModule):
             )
         self.seed = int(seed)
 
-        self._train_groups: List[Tuple[int, int, int]] = []
-        self._val_groups: List[Tuple[int, int, int]] = []
+        self._train_groups: List[Tuple[int, ...]] = []
+        self._val_groups: List[Tuple[int, ...]] = []
         self._train_group_dataset: List[str] = []
         self._train_group_branch: List[str] = []
         self.balance_rows: List[Dict[str, Any]] = []
@@ -832,14 +873,19 @@ class Joint3DDataModule(pl.LightningDataModule):
             for name, res, conv in order:
                 gvols = keyed[(name, res, conv)]
                 group_bs = configured_bs
+                # Labels stay on the native grid, so a permutation changes their
+                # shape: one permutation per batch keeps them stackable.
                 anisotropic = len({float(r) for r in res}) > 1
-                if self.rand_transpose_zyx and group_bs > 1 and anisotropic and task != "ssl":
+                shared_perm = (
+                    self.rand_transpose_zyx and group_bs > 1
+                    and anisotropic and task != "ssl"
+                )
+                if shared_perm:
                     logger.info(
                         "rand_transpose_zyx: task=%s dataset=%s native_resolution=%s "
-                        "trains at batch_size 1 (configured %d)",
+                        "batch_size %d shares one z/y/x permutation per batch",
                         task, name, list(res), group_bs,
                     )
-                    group_bs = 1
                 try:
                     ds = self._build_group(
                         task, res, gvols, 1, deterministic=False,
@@ -860,6 +906,7 @@ class Joint3DDataModule(pl.LightningDataModule):
                     "conv": conv,
                     "ds": ds,
                     "group_bs": group_bs,
+                    "shared_perm": shared_perm,
                     "configured_bs": configured_bs,
                     "nvol": len(ds._handles),
                     "voxels": voxels,
@@ -914,7 +961,7 @@ class Joint3DDataModule(pl.LightningDataModule):
             )
 
         datasets: List[LazyVolDataset] = []
-        group_specs: List[Tuple[int, int, int]] = []
+        group_specs: List[Tuple[int, int, int, bool]] = []
         group_dataset: List[str] = []
         group_branch: List[str] = []
         rows: List[Dict[str, Any]] = []
@@ -926,7 +973,9 @@ class Joint3DDataModule(pl.LightningDataModule):
             length = n_b * int(item["group_bs"])
             item["ds"].num_samples = length
             datasets.append(item["ds"])
-            group_specs.append((offset, length, int(item["group_bs"])))
+            group_specs.append(
+                (offset, length, int(item["group_bs"]), bool(item["shared_perm"]))
+            )
             offset += length
             group_dataset.append(item["dataset"])
             group_branch.append(item["task"])
@@ -962,7 +1011,7 @@ class Joint3DDataModule(pl.LightningDataModule):
                 _scaled(self.fine_patch, self.fine_nm, item["res"]),
                 length, item["group_bs"], share, self.rand_transpose_zyx,
             )
-        self.train_dataset = ConcatDataset(datasets)
+        self.train_dataset = _PermConcatDataset(datasets)
         self._train_groups = group_specs
         self._train_group_dataset = group_dataset
         self._train_group_branch = group_branch
@@ -982,7 +1031,7 @@ class Joint3DDataModule(pl.LightningDataModule):
         self._train_group_dataset = []
         self._train_group_branch = []
         datasets: List[LazyVolDataset] = []
-        group_specs: List[Tuple[int, int, int]] = []
+        group_specs: List[Tuple[int, int, int, bool]] = []
         offset = 0
         for task, bcfg in self.branches.items():
             bs = int(bcfg.get("batch_size", 2))
@@ -1004,17 +1053,19 @@ class Joint3DDataModule(pl.LightningDataModule):
                 group_bs = bs
                 # The recon target is nearest-upsampled onto the cubic fine
                 # grid before collation, so an ssl batch stacks.  Labels stay
-                # native: a zyx permutation gives an anisotropic label two
-                # shapes, and that group cannot stack.
+                # native: a zyx permutation changes an anisotropic label's
+                # shape, so such a batch shares ONE permutation to stack.
                 anisotropic = len(set(float(r) for r in res)) > 1
-                label_varies = anisotropic and task != "ssl"
-                if self.rand_transpose_zyx and group_bs > 1 and label_varies:
+                shared_perm = (
+                    self.rand_transpose_zyx and group_bs > 1
+                    and anisotropic and task != "ssl"
+                )
+                if shared_perm:
                     logger.info(
                         "rand_transpose_zyx: task=%s %s native_resolution=%s "
-                        "trains at batch_size 1 (configured %d)",
+                        "batch_size %d shares one z/y/x permutation per batch",
                         task, desc, list(res), group_bs,
                     )
-                    group_bs = 1
                 try:
                     ds = self._build_group(
                         task, res, gvols, n_group, deterministic=False,
@@ -1031,7 +1082,7 @@ class Joint3DDataModule(pl.LightningDataModule):
                     )
                     continue
                 datasets.append(ds)
-                group_specs.append((offset, len(ds), group_bs))
+                group_specs.append((offset, len(ds), group_bs, shared_perm))
                 offset += len(ds)
                 logger.info(
                     "Joint train group: task=%s %s vols=%d native_patch=%s "
@@ -1041,7 +1092,7 @@ class Joint3DDataModule(pl.LightningDataModule):
                 )
         if not datasets:
             raise ValueError("Joint3DDataModule: no train volumes configured under data.branches.")
-        self.train_dataset = ConcatDataset(datasets)
+        self.train_dataset = _PermConcatDataset(datasets)
         self._train_groups = group_specs
 
     def _setup_val(self) -> None:
