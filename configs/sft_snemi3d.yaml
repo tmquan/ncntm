@@ -1,23 +1,39 @@
 # =====================================================================
-# pretrain_snemi3d.yaml  --  VoxelDiT2-3D (H/16, ~1B) self-supervised
-# pretraining on SNEMI3D / Kasthuri 2015 raw EM only (no segmentation)
+# sft_snemi3d.yaml  --  VoxelDiT2-3D (H/16, ~1B) joint reconstruction +
+# instance-segmentation fine-tuning on SNEMI3D / Kasthuri 2015
 # =====================================================================
-# Every batch is task ``ssl``: reconstruct clean 4 nm EM from a degraded
-# large-voxel input (RandResolutionDegraded).  The backbone is a pixel-space
-# diffusion transformer on 16^3 voxel patches (no VAE); the rectified-flow
-# term runs on voxels.  Volumes are those in data/SNEMI3D (see
-# docs/DATASETS.md).
+# Same run as cpt_snemi3d.yaml, plus the affinity.  The ssl branch, the
+# optimiser, the schedule and the validation volumes match that config.
+# What changes is the labeled supervision:
 #
-# The head is still 32 channels (30 affinity offsets + sem + raw) so a later
-# SFT run can load this checkpoint without a head-shape change.
+#   sft  labeled crops: SNEMI3D train (train_labels) and the Kasthuri
+#        cylinder (neurons segmentation).  ``weight_seg`` turns on the
+#        multi-scale affinity (30 Mutex-Watershed offsets, ``loss.seg``)
+#        and the foreground head.  ``weight_sft`` matches ``weight_ssl``.
+#   ssl  the same two raw Kasthuri volumes as cpt, at the same weight.
+#
+# AC3 is the labeled holdout (docs/DATASETS.md): validation runs the Mutex
+# Watershed on its predicted affinities and logs ARI / AMI / VOI / TED.
+# AC4 stays an ssl reconstruction check, as in cpt; train_em is AC4, so it
+# is not an affinity holdout.  The Kasthuri cropping still overlaps AC3 in
+# y 8712-9248 as raw EM only.
+#
+# Start from the pretrain weights (weights-only warm start; the head is
+# unchanged, so every key loads):
+#
+#   python scripts/train.py --config-name sft_snemi3d \
+#     ckpt_path=<cpt run>/checkpoints/last.ckpt
+#
+# With ``ckpt_path: null`` the run starts from the inflated 2-D
+# PixelDiT2 weights (``model.pretrained``) instead.
 #
 # Volumes resolve under $NCNTM_DATA_DIR (default: <cwd>/data); missing
 # volumes are skipped with a warning, so run from the repo root.
 # The 2-D PixelDiT2 checkpoint comes from $NCNTM_CACHE_DIR (default
-# ~/.cache/ncntm/pixeldit2).
+# ~/.cache/ncntm/pixeldit2); timm caches DINOv3 in the HuggingFace cache.
 # =====================================================================
 
-experiment_name: ncntm-pixeldit2-h16-pretrain-snemi3d
+experiment_name: ncntm-voxeldit2-h16-sft-snemi3d
 project_name: ncntm
 seed: 42
 ckpt_path: null
@@ -43,6 +59,10 @@ data:
   ssl_min_foreground: 0.7
   ssl_min_std: 0.05
   ssl_min_autocorr: 0.5
+  # sft crop gate: label foreground AND image non-zero >= 0.8, and enough
+  # distinct instances that the affinity loss sees push (separate) pairs.
+  sft_min_foreground: 0.8
+  sft_min_instances: 5
   balance: dataset
   within_dataset: tissue
 
@@ -67,6 +87,30 @@ data:
     missing_fill: zero
 
   branches:
+    sft:
+      task: sft
+      # A labeled anisotropic (30x6x6) group runs at batch size 1: the label
+      # stays on the native grid (see ncntm.datamodules.joint3d).
+      batch_size: 2
+      sample_weight: 1.0
+      volumes:
+      # SNEMI3D train (= AC4 with wider background borders); EM is the
+      # uncorrected-contrast image, as in the challenge files.
+      - vol: train_em_inputs
+        seg: train_labels
+        root: ${snemi3d_root}
+        dataset: SNEMI3D
+        native_resolution: [30, 6, 6]
+        imaging: ssSEM
+        label_convention: gapped
+      # Kasthuri cylinder (cc image + neurons segmentation).
+      - vol: neurons_cc_5000x2900x300_x3000_y7200_z950_volume
+        seg: neurons_5000x2900x300_x3000_y7200_z950_segmentation
+        root: ${snemi3d_root}
+        dataset: kasthuri_cylinder
+        native_resolution: [30, 6, 6]
+        imaging: ssSEM
+        label_convention: gapped
     ssl:
       task: ssl
       batch_size: 4
@@ -91,12 +135,15 @@ data:
   val_balance: dataset
   val_num_samples: 100
   val_volumes:
+  # AC3 (SFT test): contrast-corrected and uncorrected EM share AC3_labels.
   - vol: AC3_cc_inputs
+    seg: AC3_labels
     root: ${snemi3d_root}
     dataset: AC3_cc
-    task: ssl
+    task: sft
     native_resolution: [30, 6, 6]
     imaging: ssSEM
+    label_convention: gapped
   - vol: AC4_cc_inputs
     root: ${snemi3d_root}
     dataset: AC4_cc
@@ -106,11 +153,13 @@ data:
   # Uncorrected-contrast copies of the same tissue: tracks robustness to the
   # per-slice brightness swings the cc training data does not have.
   - vol: AC3_em_inputs
+    seg: AC3_labels
     root: ${snemi3d_root}
     dataset: AC3_em
-    task: ssl
+    task: sft
     native_resolution: [30, 6, 6]
     imaging: ssSEM
+    label_convention: gapped
   - vol: AC4_em_inputs
     root: ${snemi3d_root}
     dataset: AC4_em
@@ -130,10 +179,14 @@ model:
   # to 3-D; false trains the same geometry from random init.
   pretrained: true
   dtype: bf16                  # paired with training.precision bf16-true
+  # Only the DINOv3 grounding encoder is frozen; the DiT, its grounding
+  # projector and the task head train.
   freeze_dit_backbone: false
-  # No representation grounding: the DiT conditions on timestep and class
-  # only, so DINOv3 / timm are not loaded.
-  grounding_encoder: null
+  # Tri-planar grounding: DINOv3 ViT-S/16 on every 4th section along z, y
+  # and x, averaged onto the 16^3 token grid.
+  grounding_encoder: dinov3_vits16
+  grounding_axes: [z, y, x]
+  grounding_slice_stride: 4
   gradient_checkpointing: false
   # The task forward reads the DiT at the degraded endpoint of the flow.
   feature_timestep: 1.0
@@ -150,23 +203,31 @@ optimizer:
     warmup_epochs: 1
   dit_backbone_lr: 6.0e-5
 
-# Joint3DReconSegLoss, reconstruction only.  The seg block only fixes the
-# 32-channel head layout; weight_seg is 0 and no sft batch is drawn.
+# Joint3DReconSegLoss.  Same weights as cpt_snemi3d.yaml except the affinity:
+# weight_seg is 1, so the 30-offset affinity and the foreground head run on
+# sft batches, and weight_sft is 5 to match weight_ssl (0 would zero that
+# branch, affinity included).  weight_dif stays 0: the rectified-flow term is
+# skipped on 30x6x6 nm data (no sample is native at 4 nm).
 loss:
   type: joint3d
   recon_loss: l1
   weight_rec: 1.0
-  weight_dif: 1.0
+  weight_dif: 0.0
   diffusion_steps: 35
-  weight_seg: 0.0
+  weight_seg: 1.0
   weight_ssl: 5.0
-  weight_sft: 0.0
+  weight_sft: 5.0
   # Residual next-scale reconstruction, coarse to fine; a scale is scored
   # only when the crop was measured at least that finely.
   var:
     enabled: true
     fine_nm: 4
     scales_nm: [32, 16, 8, 4]
+  # Multi-scale affinity (Mutex Watershed): the first n_pull offsets are the
+  # nearest-neighbour "pull" (merge) edges; the rest are long-range "push"
+  # (separate) edges at strides 2, 4, 8, 16 and 32 voxels in-plane (z up to 8),
+  # plus the same strides on the diagonals.  The head is pooled to the label
+  # grid before the loss, so each stride is measured on the native sections.
   seg:
     ignore_index: -100
     background: -1
@@ -225,7 +286,8 @@ loss:
       dice_two_sided: true
 
 training:
-  # Constructed by the module but never run (ssl batches carry no labels).
+  # Runs on the labeled val batches: Mutex Watershed on the predicted
+  # affinities, scored against the AC3 instances (ARI, AMI, VOI, TED).
   mutex_watershed:
     strides: [1, 1, 1]
     size_filter: 50
