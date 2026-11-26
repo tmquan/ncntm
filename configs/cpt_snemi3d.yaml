@@ -160,7 +160,7 @@ loss:
   type: joint3d
   recon_loss: l1
   weight_rec: 1.0
-  weight_dif: 0.0
+  weight_dif: 1.0
   diffusion_steps: 35
   weight_seg: 0.0
   weight_ssl: 5.0
