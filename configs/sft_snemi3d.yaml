@@ -8,7 +8,7 @@
 #
 #   sft  labeled crops: SNEMI3D train (train_labels) and the Kasthuri
 #        cylinder (neurons segmentation).  ``weight_seg`` turns on the
-#        multi-scale affinity (30 Mutex-Watershed offsets, ``loss.seg``)
+#        affinity (18 isotropic Mutex-Watershed offsets, ``loss.seg``)
 #        and the foreground head.  ``weight_sft`` matches ``weight_ssl``.
 #   ssl  the same two raw Kasthuri volumes as cpt, at the same weight.
 #
@@ -37,7 +37,9 @@ experiment_name: ncntm-voxeldit2-h16-sft-snemi3d
 project_name: ncntm
 seed: 42
 ckpt_path: null
-ckpt_path_skip_prefixes: []
+# Drops the final head conv (32 -> 20 affinity+sem+raw channels) from a
+# 30-offset checkpoint; every other key still loads.
+ckpt_path_skip_prefixes: ["model.head.block.4."]
 ckpt_path_only_prefixes: null
 
 snemi3d_root: ${oc.env:NCNTM_DATA_DIR,${hydra:runtime.cwd}/data}/SNEMI3D
@@ -172,7 +174,7 @@ model:
   type: joint3d_voxeldit       # JointVoxelDiT3DModule (VoxelDiT2-3D)
   variant: H/16                # hidden 1280, 32 blocks, 16^3 voxel patches
   in_channels: 1
-  head_channels: 32            # len(loss.seg.offsets)=30 + sem + raw
+  head_channels: 20            # len(loss.seg.offsets)=18 + sem + raw
   feature_size: 64
   pixel_channels: 16           # unpatchified DiT features fed to the head
   dropout: 0.5
@@ -205,7 +207,7 @@ optimizer:
   dit_backbone_lr: 6.0e-5
 
 # Joint3DReconSegLoss.  Same weights as cpt_snemi3d.yaml except the affinity:
-# weight_seg is 1, so the 30-offset affinity and the foreground head run on
+# weight_seg is 1, so the 18-offset affinity and the foreground head run on
 # sft batches, and weight_sft is 5 to match weight_ssl (0 would zero that
 # branch, affinity included).  weight_dif is the rectified-flow weight that
 # trains the DiT for the pred/Euler path, so it stays on.  The flow term is
@@ -226,46 +228,35 @@ loss:
     enabled: true
     fine_nm: 4
     scales_nm: [32, 16, 8, 4]
-  # Multi-scale affinity (Mutex Watershed): the first n_pull offsets are the
-  # nearest-neighbour "pull" (merge) edges; the rest are long-range "push"
-  # (separate) edges at strides 2, 4, 8, 16 and 32 voxels in-plane (z up to 8),
-  # plus the same strides on the diagonals.  The head is pooled to the label
-  # grid before the loss, so each stride is measured on the native sections.
+  # Isotropic affinity (Mutex Watershed): the same strides 1, 2, 3, 4, 5 and 8
+  # along z, y and x, so the offset set is unchanged under the z/y/x
+  # permutation.  The first n_pull offsets are the nearest-neighbour "pull"
+  # (merge) edges, one per axis; the other 15 are "push" (separate) edges.
+  # The head is pooled to the label grid before the loss, so strides are
+  # counted in native label voxels.
   seg:
     ignore_index: -100
     background: -1
-    n_pull: 5
+    n_pull: 3
     offsets:
     - [-1, 0, 0]
     - [0, -1, 0]
     - [0, 0, -1]
-    - [0, -1, -1]
-    - [0, 1, -1]
     - [-2, 0, 0]
     - [-3, 0, 0]
     - [-4, 0, 0]
     - [-5, 0, 0]
     - [-8, 0, 0]
     - [0, -2, 0]
-    - [0, 0, -2]
+    - [0, -3, 0]
     - [0, -4, 0]
-    - [0, 0, -4]
+    - [0, -5, 0]
     - [0, -8, 0]
+    - [0, 0, -2]
+    - [0, 0, -3]
+    - [0, 0, -4]
+    - [0, 0, -5]
     - [0, 0, -8]
-    - [0, -16, 0]
-    - [0, 0, -16]
-    - [0, -32, 0]
-    - [0, 0, -32]
-    - [0, -2, -2]
-    - [0, 2, -2]
-    - [0, -4, -4]
-    - [0, 4, -4]
-    - [0, -8, -8]
-    - [0, 8, -8]
-    - [0, -16, -16]
-    - [0, 16, -16]
-    - [0, -32, -32]
-    - [0, 32, -32]
     weight_aff:
       weight: 1.0
       lambda_bce: 1.0

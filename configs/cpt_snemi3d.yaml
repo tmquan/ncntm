@@ -171,62 +171,62 @@ loss:
     enabled: true
     fine_nm: 4
     scales_nm: [32, 16, 8, 4]
-  seg:
-    ignore_index: -100
-    background: -1
-    n_pull: 5
-    offsets:
-    - [-1, 0, 0]
-    - [0, -1, 0]
-    - [0, 0, -1]
-    - [0, -1, -1]
-    - [0, 1, -1]
-    - [-2, 0, 0]
-    - [-3, 0, 0]
-    - [-4, 0, 0]
-    - [-5, 0, 0]
-    - [-8, 0, 0]
-    - [0, -2, 0]
-    - [0, 0, -2]
-    - [0, -4, 0]
-    - [0, 0, -4]
-    - [0, -8, 0]
-    - [0, 0, -8]
-    - [0, -16, 0]
-    - [0, 0, -16]
-    - [0, -32, 0]
-    - [0, 0, -32]
-    - [0, -2, -2]
-    - [0, 2, -2]
-    - [0, -4, -4]
-    - [0, 4, -4]
-    - [0, -8, -8]
-    - [0, 8, -8]
-    - [0, -16, -16]
-    - [0, 16, -16]
-    - [0, -32, -32]
-    - [0, 32, -32]
-    weight_aff:
-      weight: 1.0
-      lambda_bce: 1.0
-      lambda_dice: 1.0
-      lambda_focal: 1.0
-      gamma: 3.0
-      pull_weight: 1.0
-      push_weight: 3.0
-      mask_to_foreground: true
-      class_balance: auto
-      class_balance_clip: 10.0
-      dice_two_sided: true
-    weight_sem:
-      weight: 1.0
-      lambda_bce: 1.0
-      lambda_dice: 1.0
-      lambda_focal: 1.0
-      gamma: 3.0
-      class_balance: auto
-      class_balance_clip: 10.0
-      dice_two_sided: true
+  # seg:
+  #   ignore_index: -100
+  #   background: -1
+  #   n_pull: 5
+  #   offsets:
+  #   - [-1, 0, 0]
+  #   - [0, -1, 0]
+  #   - [0, 0, -1]
+  #   - [0, -1, -1]
+  #   - [0, 1, -1]
+  #   - [-2, 0, 0]
+  #   - [-3, 0, 0]
+  #   - [-4, 0, 0]
+  #   - [-5, 0, 0]
+  #   - [-8, 0, 0]
+  #   - [0, -2, 0]
+  #   - [0, 0, -2]
+  #   - [0, -4, 0]
+  #   - [0, 0, -4]
+  #   - [0, -8, 0]
+  #   - [0, 0, -8]
+  #   - [0, -16, 0]
+  #   - [0, 0, -16]
+  #   - [0, -32, 0]
+  #   - [0, 0, -32]
+  #   - [0, -2, -2]
+  #   - [0, 2, -2]
+  #   - [0, -4, -4]
+  #   - [0, 4, -4]
+  #   - [0, -8, -8]
+  #   - [0, 8, -8]
+  #   - [0, -16, -16]
+  #   - [0, 16, -16]
+  #   - [0, -32, -32]
+  #   - [0, 32, -32]
+  #   weight_aff:
+  #     weight: 1.0
+  #     lambda_bce: 1.0
+  #     lambda_dice: 1.0
+  #     lambda_focal: 1.0
+  #     gamma: 3.0
+  #     pull_weight: 1.0
+  #     push_weight: 3.0
+  #     mask_to_foreground: true
+  #     class_balance: auto
+  #     class_balance_clip: 10.0
+  #     dice_two_sided: true
+  #   weight_sem:
+  #     weight: 1.0
+  #     lambda_bce: 1.0
+  #     lambda_dice: 1.0
+  #     lambda_focal: 1.0
+  #     gamma: 3.0
+  #     class_balance: auto
+  #     class_balance_clip: 10.0
+  #     dice_two_sided: true
 
 training:
   # Constructed by the module but never run (ssl batches carry no labels).
