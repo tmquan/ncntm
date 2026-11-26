@@ -88,16 +88,41 @@ _CURATED_PUSH_DISTANCES = (2, 4, 8)
 
 
 def _curated_aff_indices(offsets, n_pull: int) -> list:
-    """All pull offsets, then push offsets with one non-zero axis at distance 2/4/8."""
+    """Curated affinity channels in display order.
+
+    All pull offsets first, then the single-axis push offsets grouped by
+    distance (2, 4, 8), with the axes ordered z, y, x inside each distance.
+    Each row of the 3-column TensorBoard grid is therefore one distance:
+    ``z-2 y-2 x-2`` / ``z-4 y-4 x-4`` / ``z-8 y-8 x-8``.
+    """
     keep = list(range(min(n_pull, len(offsets))))
-    for i, off in enumerate(offsets):
-        if i < n_pull:
-            continue
-        vec = [int(v) for v in off]
-        nz = [v for v in vec if v != 0]
-        if len(nz) == 1 and abs(nz[0]) in _CURATED_PUSH_DISTANCES:
-            keep.append(i)
+    for dist in _CURATED_PUSH_DISTANCES:
+        for axis in range(3):
+            for i, off in enumerate(offsets):
+                if i < n_pull:
+                    continue
+                vec = [int(v) for v in off]
+                nz = [a for a, v in enumerate(vec) if v != 0]
+                if nz == [axis] and abs(vec[axis]) == dist:
+                    keep.append(i)
     return keep
+
+
+def _curated_aff_names(offsets, n_pull: int) -> list:
+    """Per-offset TB names, numbered by curated display position.
+
+    TensorBoard sorts image panels by tag name, so the curated tags are
+    numbered 01, 02, ... in the order given by :func:`_curated_aff_indices`.
+    Non-curated offsets keep their offset-index name.  The first ``n_pull``
+    curated entries are the pull offsets, so each rank's pull/push kind
+    matches its offset.
+    """
+    curated = _curated_aff_indices(offsets, n_pull)
+    display = offset_names([offsets[k] for k in curated], n_pull)
+    names = list(offset_names(offsets, n_pull))
+    for rank, k in enumerate(curated):
+        names[k] = display[rank]
+    return names
 
 
 def _prompt_kw(batch, i: int) -> dict:
@@ -524,14 +549,22 @@ class Joint3DImageLogger(ImageLogger):
         offsets = getattr(agg, "offsets", AFFINITY_OFFSETS) if agg else AFFINITY_OFFSETS
         n_pull = getattr(agg, "n_pull", N_PULL) if agg else N_PULL
         aff = pooled[:, crit.aff_slice].sigmoid().float()
-        names = offset_names(offsets, n_pull)
-        mask_2d = torch.ones_like(_to_2d(aff[:, :1], frac_z))
+        names = _curated_aff_names(offsets, n_pull)
+        # Same xy section as the true/label, true/sem and pred/sem xy planes:
+        # those use the texture fraction (or the mid-slice), not ``frac_z``.
+        # A different depth per sample makes the affinity tiles look like
+        # they belong to other samples of the batch.
+        if ortho:
+            aff_frac = fracs["xy"] if fracs is not None else None
+        else:
+            aff_frac = frac_z
+        mask_2d = torch.ones_like(_to_2d(aff[:, :1], aff_frac))
         # Pull offsets plus the single-axis push offsets at distances 2, 4, 8:
         # 12 panels, a multiple of 3 for the TensorBoard grid.
         _add_aff_panels(
             tb, ctx, aff, _curated_aff_indices(offsets, n_pull),
             names=names, mask_2d=mask_2d, epoch=epoch, tag_prefix="pred/aff",
-            size=target_hw, frac=frac_z,
+            size=target_hw, frac=aff_frac,
         )
 
         if agg is not None and self.spatial_dims == 3:

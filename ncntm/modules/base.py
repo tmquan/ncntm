@@ -747,7 +747,21 @@ class BaseCircuitModule(pl.LightningModule):
         return self._maybe_wrap_scheduler(optimizer)
 
     def _maybe_wrap_scheduler(self, optimizer: Any) -> Any:
-        """Wrap the optimizer with a cosine-warmup schedule if configured."""
+        """Wrap the optimizer with a cosine-warmup schedule if configured.
+
+        The schedule has three parts, all counted in epochs:
+
+        * ``warmup_epochs``: linear ramp from 1 % of the base LR to the
+          base LR.
+        * ``hold_epochs`` (default 0): the base LR is kept unchanged.
+        * the rest, up to ``T_max``: cosine decay from the base LR to
+          ``eta_min``.
+
+        So the cosine starts at epoch ``warmup_epochs + hold_epochs`` (that
+        epoch is still at the base LR; the first lower value comes one
+        epoch later) and reaches ``eta_min`` at epoch ``T_max``.  With
+        ``hold_epochs: 0`` the cosine starts right after the warm-up.
+        """
         sched_cfg = self.optimizer_config.get("scheduler", {})
         stype = str(sched_cfg.get("type", "cosine") or "").lower()
 
@@ -759,15 +773,36 @@ class BaseCircuitModule(pl.LightningModule):
             warmup_epochs = sched_cfg.get("warmup_epochs", 5)
             t_max = sched_cfg.get("T_max", 100)
             eta_min = sched_cfg.get("eta_min", 1e-7)
+            hold_epochs = int(sched_cfg.get("hold_epochs", 0) or 0)
+            if hold_epochs < 0:
+                raise ValueError(
+                    f"optimizer.scheduler.hold_epochs must be >= 0, got "
+                    f"{hold_epochs}."
+                )
+            # First epoch of the cosine decay.  LinearLR keeps the base LR
+            # once its ramp is over, so the hold needs no scheduler of its
+            # own: the switch to the cosine is simply made later.
+            decay_start = warmup_epochs + hold_epochs
+            if hold_epochs and decay_start >= t_max:
+                raise ValueError(
+                    f"optimizer.scheduler: warmup_epochs ({warmup_epochs}) + "
+                    f"hold_epochs ({hold_epochs}) must be smaller than T_max "
+                    f"({t_max}); otherwise there is no epoch left to decay."
+                )
 
+            # Without a warm-up, start at the base LR: LinearLR applies
+            # ``start_factor`` at epoch 0 even when ``total_iters`` is 0,
+            # which would keep the whole hold at 1 % of the base LR.
             warmup = LinearLR(
-                optimizer, start_factor=0.01, total_iters=warmup_epochs,
+                optimizer,
+                start_factor=0.01 if warmup_epochs > 0 else 1.0,
+                total_iters=warmup_epochs,
             )
             cosine = CosineAnnealingLR(
-                optimizer, T_max=max(t_max - warmup_epochs, 1), eta_min=eta_min,
+                optimizer, T_max=max(t_max - decay_start, 1), eta_min=eta_min,
             )
             scheduler = SequentialLR(
-                optimizer, [warmup, cosine], milestones=[warmup_epochs],
+                optimizer, [warmup, cosine], milestones=[decay_start],
             )
             return {
                 "optimizer": optimizer,
