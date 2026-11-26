@@ -35,7 +35,7 @@ under ``{stage}/{mode}/{ssl,sft}/{SNEMI3D,MICRONS}/...``:
 
       {stage}/automatic/sft/true/label/{xy,xz,yz}   native instance labels
       {stage}/automatic/sft/true/sem/{xy,xz,yz}     sem target (eroded sem_label > 0)
-      {stage}/automatic/sft/pred/sem/{xy,xz,yz}     foreground (sigmoid)
+      {stage}/automatic/sft/pred/sem/{xy,xz,yz}     foreground probability (1 = white)
       {stage}/automatic/sft/pred/label/{xy,xz,yz}   Mutex-Watershed instances
       {stage}/automatic/sft/pred/aff/{offset}  12 curated affinity channels
                                               (3 pull + 9 push: -2, -4, -8 along
@@ -72,6 +72,18 @@ def _gray3(panel_2d: torch.Tensor) -> torch.Tensor:
     return repeat(_normalise(panel_2d.float()), "b 1 h w -> b 3 h w")
 
 
+def _prob3(panel_2d: torch.Tensor) -> torch.Tensor:
+    """[B,1,H,W] (or [B,H,W]) probabilities -> 3-channel TB image, no stretch.
+
+    Foreground probability 1 is white and 0 is black.  Min-max stretching
+    would turn a flat plane (all background, or a uniform probability) black
+    and exaggerate noise, so segmentation probabilities are shown as is.
+    """
+    if panel_2d.dim() == 3:
+        panel_2d = panel_2d.unsqueeze(1)
+    return repeat(panel_2d.float().clamp(0.0, 1.0), "b 1 h w -> b 3 h w")
+
+
 _CURATED_PUSH_DISTANCES = (2, 4, 8)
 
 
@@ -98,7 +110,7 @@ def _prompt_kw(batch, i: int) -> dict:
 
 def _log_ortho_planes(
     tb, ctx, epoch: int, tag: str, vol: torch.Tensor, fine_size, fracs=None,
-    *, colour: bool = False,
+    *, colour: bool = False, probability: bool = False,
 ) -> None:
     """Log the xy / xz / yz planes of ``vol`` on the 4 nm ``fine_size`` grid.
 
@@ -111,6 +123,8 @@ def _log_ortho_planes(
 
     ``colour=True`` treats ``vol`` (single channel) as integer instance ids and
     draws each plane with the instance palette instead of grayscale.
+    ``probability=True`` shows the values as probabilities in [0, 1] (1 = white)
+    without the per-plane contrast stretch.
     """
     planes = (
         _orthogonal_texture_planes(vol, fine_size, fracs)
@@ -122,7 +136,7 @@ def _log_ortho_planes(
         else:
             if plane.shape[1] != 1:
                 plane = plane.mean(dim=1, keepdim=True)
-            rgb = _gray3(plane)
+            rgb = _prob3(plane) if probability else _gray3(plane)
         tb.add_images(ctx.tag(f"{tag}/{name}"), rgb, global_step=epoch)
 
 
@@ -491,14 +505,16 @@ class Joint3DImageLogger(ImageLogger):
         # Foreground (sem) prediction.
         sem = pooled[:, crit.sem_slice].sigmoid()
         if ortho:
-            _log_ortho_planes(tb, ctx, epoch, "true/sem", gt_sem.float(), fine_size, fracs)
-            _log_ortho_planes(tb, ctx, epoch, "pred/sem", sem.float(), fine_size, fracs)
+            _log_ortho_planes(tb, ctx, epoch, "true/sem", gt_sem.float(), fine_size, fracs,
+                              probability=True)
+            _log_ortho_planes(tb, ctx, epoch, "pred/sem", sem.float(), fine_size, fracs,
+                              probability=True)
         else:
-            gt_sem_panel = _gray3(_to_2d(gt_sem, frac_z))
+            gt_sem_panel = _prob3(_to_2d(gt_sem, frac_z))
             if target_hw:
                 gt_sem_panel = _resize_2d(gt_sem_panel, target_hw)
             tb.add_images(ctx.tag("true/sem"), gt_sem_panel, global_step=epoch)
-            sem_panel = _gray3(_to_2d(sem, frac_z))
+            sem_panel = _prob3(_to_2d(sem, frac_z))
             if target_hw:
                 sem_panel = _resize_2d(sem_panel, target_hw)
             tb.add_images(ctx.tag("pred/sem"), sem_panel, global_step=epoch)
