@@ -225,6 +225,12 @@ class BaseCircuitModule(pl.LightningModule):
     def forward(self, x: torch.Tensor, **kw: Any) -> torch.Tensor:
         return self.model(x, **kw)
 
+    def _model_forward(self, images: torch.Tensor, batch: Dict[str, Any]) -> torch.Tensor:
+        """Run the model; pass the batch prompts when the model takes them."""
+        if getattr(self.model, "accepts_prompts", False):
+            return self.model(images, prompts=batch.get("prompt"))
+        return self.model(images)
+
     # ------------------------------------------------------------------
     # Batch helpers
     # ------------------------------------------------------------------
@@ -319,8 +325,7 @@ class BaseCircuitModule(pl.LightningModule):
         # overhead on every step.
         targets = self._prepare_targets(batch)
 
-        # ``batch["prompt"]`` is only logged; the network always gets null text.
-        head = self.model(images)
+        head = self._model_forward(images, batch)
         losses = self.criterion(head, targets)
         losses = self._combine_field(losses, images, batch)
         total_loss = losses["loss"]
@@ -402,7 +407,7 @@ class BaseCircuitModule(pl.LightningModule):
         head = losses = targets = None
         try:
             targets = self._prepare_targets(batch)
-            head = self.model(images)
+            head = self._model_forward(images, batch)
             losses = self.criterion(head, targets)
             losses = self._combine_field(losses, images, batch)
 

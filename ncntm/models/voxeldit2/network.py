@@ -212,8 +212,12 @@ class VoxelDiT2_3D(nn.Module):
         skip_grounding: bool = False,
         skip_grounding_mask: Optional[torch.Tensor] = None,
         feature_layers: Optional[Sequence[int]] = None,
+        cond_extra: Optional[torch.Tensor] = None,
     ):
         """Clean-volume prediction ``[B, C, D, H, W]``.
+
+        ``cond_extra`` ``[B, hidden]`` is added to the class condition (the
+        projected prompt text); ``None`` leaves the condition unchanged.
 
         With ``feature_layers`` the return is ``(x_pred, {layer: tokens})``
         where ``tokens`` is the ``[B, N, hidden]`` output of that block with
@@ -228,6 +232,8 @@ class VoxelDiT2_3D(nn.Module):
 
         t_emb = self.t_embedder(t)
         y_emb = self._class_embedding(y, batch, x.device)
+        if cond_extra is not None:
+            y_emb = y_emb + cond_extra.to(y_emb.dtype).view(batch, 1, self.hidden_size)
         c = self._condition(x, t, t_emb, y_emb, num_patches, skip_grounding, skip_grounding_mask)
 
         s = self.s_embedder(patchify_3d(x, self.patch_size).to(self.s_embedder.proj.weight.dtype))

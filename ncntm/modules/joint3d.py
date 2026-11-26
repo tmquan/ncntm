@@ -137,6 +137,13 @@ class Joint3DModule(BackboneModule):
         # Only a sample whose native grid is the 4 nm cube has a clean 4 nm
         # endpoint.  Coarser targets are nearest repeats, and the velocity
         # toward them is a velocity toward slabs.
+        prompts = batch.get("prompt")
+        if isinstance(prompts, str):
+            prompts = [prompts] * images.shape[0]
+        if prompts is not None and len(prompts) != images.shape[0]:
+            prompts = None
+        if prompts is not None:
+            prompts = list(prompts)
         native = batch.get("recon_native_size")
         if native is not None:
             native = torch.as_tensor(native, device=images.device)
@@ -149,7 +156,9 @@ class Joint3DModule(BackboneModule):
             if not bool(keep.all()):
                 idx = keep.nonzero().flatten()
                 images, clean = images[idx], clean[idx]
-        flow = flow_fn(images, clean)
+                if prompts is not None:
+                    prompts = [prompts[i] for i in idx.tolist()]
+        flow = flow_fn(images, clean, prompts=prompts)
         losses["loss/field"] = flow
         branch = (
             self.criterion.weight_ssl

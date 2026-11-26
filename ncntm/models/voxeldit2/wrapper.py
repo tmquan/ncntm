@@ -50,6 +50,7 @@ from ncntm.models.common import (
     resolve_freeze_dit_backbone,
 )
 from ncntm.models.voxeldit2.checkpoint import download_checkpoint, load_pretrained_2d
+from ncntm.models.text import get_prompt_encoder
 from ncntm.models.voxeldit2.network import VoxelDiT2_3D
 from ncntm.models.voxeldit2.variants import _VARIANT_CONFIGS
 
@@ -61,6 +62,9 @@ _CKPT_TARGETS = {"dit", "head"}
 
 class VoxelDiT2Wrapper3D(nn.Module):
     """VoxelDiT2-3D as a volumetric EM reconstruction / segmentation backbone.
+
+    ``accepts_prompts`` tells the Lightning module that ``forward``,
+    ``rectified_flow_loss`` and ``few_step_reconstruct`` take the batch prompts.
 
     Args:
         in_channels: Input channels (1 for EM).
@@ -95,6 +99,11 @@ class VoxelDiT2Wrapper3D(nn.Module):
             :class:`~ncntm.models.voxeldit2.grounding.GroundingConditioner3D`.
         dit_overrides: Extra :class:`VoxelDiT2_3D` kwargs on top of the
             variant (e.g. ``depth``, ``patch_size``).
+        text_encoder: Hugging Face id of a T5 encoder (e.g.
+            ``google-t5/t5-small``) for the batch prompt, or ``None`` for no text
+            condition.  The encoder is frozen and downloaded on first use.
+        text_cache_dir: Where the T5 weights are cached (default: the Hugging
+            Face cache).
     """
 
     _variant_configs = _VARIANT_CONFIGS
@@ -127,6 +136,8 @@ class VoxelDiT2Wrapper3D(nn.Module):
         grounding_chunk: int = 64,
         grounding_pretrained: bool = True,
         dit_overrides: Optional[dict] = None,
+        text_encoder: Optional[str] = None,
+        text_cache_dir: Optional[str] = None,
     ) -> None:
         super().__init__()
         key = str(variant).upper()
@@ -176,6 +187,18 @@ class VoxelDiT2Wrapper3D(nn.Module):
             net_kwargs["grounding_encoder"] = grounding_encoder
         net_kwargs.update(dict(dit_overrides or {}))
         self.dit = VoxelDiT2_3D(**net_kwargs)
+        # Batch prompt -> frozen T5 features -> zero-initialised projection
+        # added to the DiT class condition.  Zero init keeps the warm start
+        # identical to the no-text model.  The encoder is not an nn.Module,
+        # so its weights are not in the state_dict.
+        self._prompt_encoder = None
+        self.text_proj: Optional[nn.Linear] = None
+        if text_encoder:
+            enc = get_prompt_encoder(text_encoder, cache_dir=text_cache_dir)
+            self._prompt_encoder = enc
+            self.text_proj = nn.Linear(enc.dim, self.dit.hidden_size)
+            nn.init.zeros_(self.text_proj.weight)
+            nn.init.zeros_(self.text_proj.bias)
 
         self._backbone_loaded = False
         if pretrained:
@@ -332,9 +355,27 @@ class VoxelDiT2Wrapper3D(nn.Module):
             parts.append(self.skip_stem(x_model.to(head_dtype)))
         return torch.cat(parts, dim=1)
 
-    def _forward_model_space(self, x_model: torch.Tensor, spatial: Sequence[int]) -> torch.Tensor:
+    def _text_condition(self, prompts: Any, like: torch.Tensor) -> Optional[torch.Tensor]:
+        """``[B, hidden]`` prompt condition, or ``None`` (no text / no prompt)."""
+        if self.text_proj is None or prompts is None:
+            return None
+        batch = like.shape[0]
+        if isinstance(prompts, str):
+            prompts = [prompts] * batch
+        prompts = [str(p) for p in prompts]
+        if len(prompts) != batch:
+            raise ValueError(f"got {len(prompts)} prompts for a batch of {batch}.")
+        feats = self._prompt_encoder(prompts, like.device)
+        return self.text_proj(feats.to(self.text_proj.weight.dtype))
+
+    def _forward_model_space(
+        self, x_model: torch.Tensor, spatial: Sequence[int], prompts: Any = None,
+    ) -> torch.Tensor:
         t = self._timesteps(self._feature_timestep, x_model.shape[0], x_model.device)
-        x_pred, feats = self.dit(x_model, t, feature_layers=self._feature_layers)
+        cond = self._text_condition(prompts, x_model)
+        x_pred, feats = self.dit(
+            x_model, t, feature_layers=self._feature_layers, cond_extra=cond,
+        )
         feat_list = [feats[i] for i in self._feature_layers]
         if "head" in self._ckpt_targets and self.training and torch.is_grad_enabled():
             # One checkpoint per stage: the head runs at full voxel resolution,
@@ -351,11 +392,12 @@ class VoxelDiT2Wrapper3D(nn.Module):
     def forward(self, x: torch.Tensor, prompts: Any = None) -> torch.Tensor:
         """``[B, C, D, H, W]`` in ``[0, 1]`` -> ``[B, head_channels, D, H, W]`` (raw logits / values).
 
-        ``prompts`` is accepted for interface parity and ignored.
+        ``prompts`` (one string per sample) condition the DiT when the wrapper
+        was built with ``text_encoder``; otherwise they are ignored.
         """
         with torch.autocast(device_type=x.device.type, enabled=False):
             x_model, spatial = self._to_model_space(x)
-            return self._forward_model_space(x_model, spatial)
+            return self._forward_model_space(x_model, spatial, prompts)
 
     # ------------------------------------------------------------------
     # Rectified flow
@@ -366,7 +408,8 @@ class VoxelDiT2Wrapper3D(nn.Module):
     ) -> torch.Tensor:
         """Velocity ``(x_t - x_pred) / max(t, t_eps)`` of a model-space state ``x_t``."""
         t = self._timesteps(t_unit, x_t.shape[0], x_t.device)
-        x_pred = self.dit(x_t.to(self._dit_dtype()), t)
+        cond = self._text_condition(prompts, x_t)
+        x_pred = self.dit(x_t.to(self._dit_dtype()), t, cond_extra=cond)
         scale = t.clamp_min(self._flow_t_eps).view(-1, 1, 1, 1, 1)
         return (x_t.float() - x_pred.float()) / scale
 
@@ -395,7 +438,7 @@ class VoxelDiT2Wrapper3D(nn.Module):
             lo, hi = self._flow_t_range
             t = torch.empty(x0.shape[0], device=x0.device).uniform_(lo, hi)
             x_t, velocity = interpolate_rectified_flow(x0, x1, t)
-            pred = self.predict_velocity(x_t, t)
+            pred = self.predict_velocity(x_t, t, prompts)
             return F.mse_loss(self._crop(pred, spatial), self._crop(velocity, spatial))
 
     @torch.no_grad()
@@ -406,9 +449,9 @@ class VoxelDiT2Wrapper3D(nn.Module):
         with torch.autocast(device_type=images.device.type, enabled=False):
             x1, spatial = self._to_model_space(images)
             refined = euler_integrate(
-                x1.float(), lambda state, t: self.predict_velocity(state, t), steps,
+                x1.float(), lambda state, t: self.predict_velocity(state, t, prompts), steps,
             )
-            return self._forward_model_space(refined.to(x1.dtype), spatial)
+            return self._forward_model_space(refined.to(x1.dtype), spatial, prompts)
 
     # ------------------------------------------------------------------
     # Freeze / unfreeze

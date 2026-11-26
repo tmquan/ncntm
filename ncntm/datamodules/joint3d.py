@@ -31,8 +31,8 @@ three axes, after :class:`~ncntm.transforms.ToFineGridd` and
 stays on the native section axis.  The fine FOV has to be cubic: ``patch_size``
 and ``pixel_size`` must both be cubic or ``__init__`` raises ``ValueError``.
 A permutation is then a pure reorientation: the recon grid moves with the
-data.  The text prompt (``{imaging} · {tail}``) is only logged; the network
-gets null text.  The finest native axis -- the
+data.  The text prompt (``{imaging} · {tail}``) is the text condition: a frozen
+T5 encoder maps it into the DiT class condition.  The finest native axis -- the
 highest-resolution dimension -- therefore lands on network z, y, or x equally
 often.  Validation stays in the stored axis order.
 
@@ -612,7 +612,7 @@ class Joint3DDataModule(pl.LightningDataModule):
         quiet: bool = False,
     ) -> LazyVolDataset:
         native_patch = _scaled(self.fine_patch, self.fine_nm, native_res)
-        # Attach the logged batch prompt (imaging · tail); the network gets null text.
+        # Attach the batch prompt (imaging · tail): the text condition.
         lazy_vols: List[Dict[str, Any]] = []
         for vol in volumes:
             entry = {k: v for k, v in vol.items() if k in ("vol", "seg", "root")}

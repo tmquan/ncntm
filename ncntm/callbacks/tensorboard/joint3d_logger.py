@@ -71,6 +71,14 @@ def _gray3(panel_2d: torch.Tensor) -> torch.Tensor:
     return repeat(_normalise(panel_2d.float()), "b 1 h w -> b 3 h w")
 
 
+def _prompt_kw(batch, i: int) -> dict:
+    """``{"prompts": [prompt_i]}`` for sample ``i``, or ``{}`` without prompts."""
+    prompts = batch.get("prompt") if isinstance(batch, dict) else None
+    if not isinstance(prompts, (list, tuple)) or i >= len(prompts):
+        return {}
+    return {"prompts": [str(prompts[i])]}
+
+
 def _log_ortho_planes(
     tb, ctx, epoch: int, tag: str, vol: torch.Tensor, fine_size, fracs=None,
     *, colour: bool = False,
@@ -234,7 +242,7 @@ class Joint3DImageLogger(ImageLogger):
             n = min(images.shape[0], self.max_images)
             fwd_module = getattr(trainer, "model", None) or pl_module
             head = torch.cat(
-                [fwd_module(images[i:i + 1]) for i in range(n)], dim=0,
+                [fwd_module(images[i:i + 1], **_prompt_kw(batch, i)) for i in range(n)], dim=0,
             ).float()
 
             # Frozen Wan-decoder diagnostic: decode the model's latent through
@@ -263,7 +271,8 @@ class Joint3DImageLogger(ImageLogger):
             diffusion_steps = int(getattr(crit_cfg, "diffusion_steps", 1) or 1)
             if callable(few_fn) and field_w > 0 and diffusion_steps > 0:
                 few_parts = [
-                    few_fn(images[i:i + 1], steps=diffusion_steps) for i in range(n)
+                    few_fn(images[i:i + 1], steps=diffusion_steps, **_prompt_kw(batch, i))
+                    for i in range(n)
                 ]
                 few_head = torch.cat(few_parts, dim=0).float()
                 raw_slice = getattr(crit_cfg, "raw_slice", None)
@@ -308,7 +317,7 @@ class Joint3DImageLogger(ImageLogger):
             # batch from one volume; resolution/subset mode may mix several).
             uniq = list(dict.fromkeys(shown))
             tb.add_text(ctx.tag("volume"), ", ".join(uniq), global_step=epoch)
-        # Logged for debugging only; the network is not conditioned on it.
+        # Logged for debugging; the same prompt also conditions the network.
         prompts = batch.get("prompt")
         if prompts is not None:
             if isinstance(prompts, str):

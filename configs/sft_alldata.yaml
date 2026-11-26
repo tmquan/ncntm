@@ -1,0 +1,484 @@
+# =====================================================================
+# sft_alldata.yaml  --  VoxelDiT2-3D (H/16, ~1B) joint reconstruction +
+# instance-segmentation fine-tuning on SNEMI3D, CREMI and MICrONS
+# =====================================================================
+# sft_snemi3d.yaml plus CREMI3D and MICrONS.  The optimiser, the schedule
+# and the SNEMI volumes are unchanged.  ``balance: dataset`` gives each
+# dataset name an equal share of its branch.
+#
+#   sft  SNEMI3D AC4 and the Kasthuri cylinder (gapped, 30x6x6), CREMI
+#        A and B (filled, 40x4x4) and 10 MICrONS crops (filled, 40x8x8).
+#        find_boundaries erodes the sem target on filled volumes only.
+#   ssl  the two raw Kasthuri volumes, plus the CREMI A+ and B+ padded
+#        images (no public labels).
+#
+# Held out: SNEMI3D AC3 (labeled, both contrasts); CREMI C (labeled) with
+# C+ padded as its image-only test; two MICrONS crops (x105000, x70000)
+# as the labeled MICrONS test.
+#
+# Start from the pretrain weights (weights-only warm start; the head is
+# unchanged, so every key loads):
+#
+#   python scripts/train.py --config-name sft_snemi3d \
+#     ckpt_path=<cpt run>/checkpoints/last.ckpt
+#
+# With ``ckpt_path: null`` the run starts from the inflated 2-D
+# PixelDiT2 weights (``model.pretrained``) instead.
+#
+# Volumes resolve under $NCNTM_DATA_DIR (default: <cwd>/data); missing
+# volumes are skipped with a warning, so run from the repo root.
+# The 2-D PixelDiT2 checkpoint comes from $NCNTM_CACHE_DIR (default
+# ~/.cache/ncntm/pixeldit2); timm caches DINOv3 in the HuggingFace cache.
+# =====================================================================
+
+experiment_name: ncntm-voxeldit2-h16-sft-alldata
+project_name: ncntm
+seed: 42
+ckpt_path: null
+# Drops the final head conv (32 -> 20 affinity+sem+raw channels) from a
+# 30-offset checkpoint; every other key still loads.
+ckpt_path_skip_prefixes: ["model.head.block.4."]
+ckpt_path_only_prefixes: null
+
+snemi3d_root: ${oc.env:NCNTM_DATA_DIR,${hydra:runtime.cwd}/data}/SNEMI3D
+cremi3d_root: ${oc.env:NCNTM_DATA_DIR,${hydra:runtime.cwd}/data}/CREMI3D
+microns_root: ${oc.env:NCNTM_DATA_DIR,${hydra:runtime.cwd}/data}/MICRONS
+
+data:
+  # Fixed fine network grid: 4 nm cubic voxel, patch (z, y, x).  16^3 voxel
+  # DiT patches -> token grid (16, 16, 16), 4096 tokens.
+  patch_size: [256, 256, 256]
+  pixel_size: [4, 4, 4]
+  # Train-only z/y/x permutation (cubic FOV); section degradation follows
+  # the native section axis.
+  rand_transpose_zyx: true
+  num_workers: 8
+  pin_memory: true
+  persistent_workers: true
+  prefetch_factor: 8
+  # Crop gates on the per-volume [0,1] scale: non-zero fraction, std, and
+  # lag-1 autocorrelation (real ultrastructure ~0.6-0.8, noise ~0).
+  ssl_min_foreground: 0.7
+  ssl_min_std: 0.05
+  ssl_min_autocorr: 0.5
+  # sft crop gate: label foreground AND image non-zero >= 0.8, and enough
+  # distinct instances that the affinity loss sees push (separate) pairs.
+  sft_min_foreground: 0.8
+  sft_min_instances: 5
+  # Erodes the sem target on filled volumes (CREMI, MICrONS).  Gapped
+  # volumes (SNEMI, Kasthuri) already have membrane gaps and skip it.
+  find_boundaries: 1.0
+  balance: dataset
+  within_dataset: tissue
+
+  # Augment (whole-crop gamma) is in the loss target; Corrupt (per-section
+  # jitter / gamma / noise) and Missing (whole native sections) touch the
+  # input only.  30x6x6 crops are anisotropic: one in-plane axis is
+  # downsampled to the 30 nm z spacing with probability fine_axis_prob.
+  degrade:
+    zf_range: [2.0, 10.0]
+    fine_axis_prob: 0.8
+    slab_mean_prob: 0.5
+    volume_contrast_prob: 0.5
+    volume_contrast_gamma: [0.8, 1.25]
+    jitter_prob: 0.5
+    max_jitter: 2.0
+    contrast_prob: 0.5
+    contrast_gamma: [0.8, 1.25]
+    noise_prob: 0.3
+    noise_std: 0.01
+    missing_prob: 0.3
+    max_missing: 2
+    missing_fill: zero
+
+  branches:
+    sft:
+      task: sft
+      # The label stays on the native grid, so under rand_transpose_zyx every
+      # sample of a batch shares one z/y/x permutation (a different one per
+      # batch) and the labels stack (see ncntm.datamodules.joint3d).
+      batch_size: 4
+      sample_weight: 1.0
+      volumes:
+      # SNEMI3D AC4 (labeled train).  EM is the uncorrected-contrast image.
+      - vol: AC4_em_inputs
+        seg: AC4_labels
+        root: ${snemi3d_root}
+        dataset: SNEMI3D
+        native_resolution: [30, 6, 6]
+        imaging: ssSEM
+        label_convention: gapped
+      # Kasthuri cylinder (cc image + neurons segmentation).
+      - vol: neurons_cc_5000x2900x300_x3000_y7200_z950_volume
+        seg: neurons_5000x2900x300_x3000_y7200_z950_segmentation
+        root: ${snemi3d_root}
+        dataset: kasthuri_cylinder
+        native_resolution: [30, 6, 6]
+        imaging: ssSEM
+        label_convention: gapped
+
+      # CREMI A and B (ssTEM, 40x4x4 nm).  Ids fill space, so the convention
+      # is filled and FindBoundariesd supplies the membrane gaps.  C is the
+      # labeled test (val_volumes).
+      - vol: cremi3d_sample_A_volume
+        seg: cremi3d_sample_A_segmentation
+        root: ${cremi3d_root}
+        dataset: CREMI3D
+        native_resolution: [40, 4, 4]
+        imaging: ssTEM
+        label_convention: filled
+      - vol: cremi3d_sample_B_volume
+        seg: cremi3d_sample_B_segmentation
+        root: ${cremi3d_root}
+        dataset: CREMI3D
+        native_resolution: [40, 4, 4]
+        imaging: ssTEM
+        label_convention: filled
+
+      # MICrONS minnie65 (ssTEM, 40x8x8 nm), v1300 auto-seg, filled.
+      # x105000 and x70000 are the labeled test (val_volumes).
+      - vol: minnie65_mip0_4096x4096x800_x50000_y60000_z16000_volume
+        seg: minnie65_mip0_4096x4096x800_x50000_y60000_z16000_v1300_segmentation
+        root: ${microns_root}
+        dataset: MICRONS
+        native_resolution: [40, 8, 8]
+        imaging: ssTEM
+        label_convention: filled
+      - vol: minnie65_mip0_4096x4096x800_x45000_y75000_z16500_volume
+        seg: minnie65_mip0_4096x4096x800_x45000_y75000_z16500_v1300_segmentation
+        root: ${microns_root}
+        dataset: MICRONS
+        native_resolution: [40, 8, 8]
+        imaging: ssTEM
+        label_convention: filled
+      - vol: minnie65_mip0_4096x4096x800_x60000_y50000_z17500_volume
+        seg: minnie65_mip0_4096x4096x800_x60000_y50000_z17500_v1300_segmentation
+        root: ${microns_root}
+        dataset: MICRONS
+        native_resolution: [40, 8, 8]
+        imaging: ssTEM
+        label_convention: filled
+      - vol: minnie65_mip0_4096x4096x800_x80000_y70000_z16500_volume
+        seg: minnie65_mip0_4096x4096x800_x80000_y70000_z16500_v1300_segmentation
+        root: ${microns_root}
+        dataset: MICRONS
+        native_resolution: [40, 8, 8]
+        imaging: ssTEM
+        label_convention: filled
+      - vol: minnie65_mip0_4096x4096x800_x90000_y85000_z18500_volume
+        seg: minnie65_mip0_4096x4096x800_x90000_y85000_z18500_v1300_segmentation
+        root: ${microns_root}
+        dataset: MICRONS
+        native_resolution: [40, 8, 8]
+        imaging: ssTEM
+        label_convention: filled
+      - vol: minnie65_mip0_4096x4096x800_x95000_y50000_z18500_volume
+        seg: minnie65_mip0_4096x4096x800_x95000_y50000_z18500_v1300_segmentation
+        root: ${microns_root}
+        dataset: MICRONS
+        native_resolution: [40, 8, 8]
+        imaging: ssTEM
+        label_convention: filled
+      - vol: minnie65_mip0_4096x4096x800_x110000_y60000_z18000_volume
+        seg: minnie65_mip0_4096x4096x800_x110000_y60000_z18000_v1300_segmentation
+        root: ${microns_root}
+        dataset: MICRONS
+        native_resolution: [40, 8, 8]
+        imaging: ssTEM
+        label_convention: filled
+      - vol: minnie65_mip0_4096x4096x800_x125000_y70000_z16500_volume
+        seg: minnie65_mip0_4096x4096x800_x125000_y70000_z16500_v1300_segmentation
+        root: ${microns_root}
+        dataset: MICRONS
+        native_resolution: [40, 8, 8]
+        imaging: ssTEM
+        label_convention: filled
+      - vol: minnie65_mip0_4096x4096x800_x130000_y50000_z17000_volume
+        seg: minnie65_mip0_4096x4096x800_x130000_y50000_z17000_v1300_segmentation
+        root: ${microns_root}
+        dataset: MICRONS
+        native_resolution: [40, 8, 8]
+        imaging: ssTEM
+        label_convention: filled
+      - vol: minnie65_mip0_4096x4096x800_x140000_y80000_z17500_volume
+        seg: minnie65_mip0_4096x4096x800_x140000_y80000_z17500_v1300_segmentation
+        root: ${microns_root}
+        dataset: MICRONS
+        native_resolution: [40, 8, 8]
+        imaging: ssTEM
+        label_convention: filled
+    ssl:
+      task: ssl
+      batch_size: 4
+      sample_weight: 1.0
+      volumes:
+      # Kasthuri cropping (cc): x 2512-8416, y 4432-9248, z 0-1848.  It
+      # contains AC4 and the cylinder's lower half, and overlaps AC3 in y
+      # 8712-9248, so the val volumes below are not a spatial holdout.
+      - vol: neurons_cc_5904x4816x1848_x2512_y4432_z0_volume
+        root: ${snemi3d_root}
+        dataset: kasthuri_cc
+        native_resolution: [30, 6, 6]
+        imaging: ssSEM
+      # Kasthuri cylinder (cc) image: adds y 9248-10100 outside the cropping.
+      - vol: neurons_cc_5000x2900x300_x3000_y7200_z950_volume
+        root: ${snemi3d_root}
+        dataset: kasthuri_cc
+        native_resolution: [30, 6, 6]
+        imaging: ssSEM
+
+      # CREMI A+ / B+ padded: image only (no public labels).  C+ padded is
+      # the image-only test (val_volumes).
+      - vol: cremi3d_sample_A+_padded_volume
+        root: ${cremi3d_root}
+        dataset: CREMI3D
+        native_resolution: [40, 4, 4]
+        imaging: ssTEM
+      - vol: cremi3d_sample_B+_padded_volume
+        root: ${cremi3d_root}
+        dataset: CREMI3D
+        native_resolution: [40, 4, 4]
+        imaging: ssTEM
+  val_batch_size: 4
+  # One group per dataset name: 4 SNEMI3D groups x 16 crops / batch 2 = 32 batches.
+  val_balance: dataset
+  val_num_samples: 100
+  val_volumes:
+  # SNEMI3D test: AC3 (contrast-corrected and uncorrected EM share AC3_labels).
+  - vol: AC3_cc_inputs
+    seg: AC3_labels
+    root: ${snemi3d_root}
+    dataset: AC3_cc
+    task: sft
+    native_resolution: [30, 6, 6]
+    imaging: ssSEM
+    label_convention: gapped
+  # Uncorrected-contrast copies of the same tissue: tracks robustness to the
+  # per-slice brightness swings the cc training data does not have.
+  - vol: AC3_em_inputs
+    seg: AC3_labels
+    root: ${snemi3d_root}
+    dataset: AC3_em
+    task: sft
+    native_resolution: [30, 6, 6]
+    imaging: ssSEM
+    label_convention: gapped
+
+  # MICrONS labeled test (2 of 12 crops).
+  - vol: minnie65_mip0_4096x4096x800_x105000_y80000_z16500_volume
+    seg: minnie65_mip0_4096x4096x800_x105000_y80000_z16500_v1300_segmentation
+    root: ${microns_root}
+    dataset: MICRONS
+    task: sft
+    native_resolution: [40, 8, 8]
+    imaging: ssTEM
+    label_convention: filled
+  - vol: minnie65_mip0_4096x4096x800_x70000_y90000_z17000_volume
+    seg: minnie65_mip0_4096x4096x800_x70000_y90000_z17000_v1300_segmentation
+    root: ${microns_root}
+    dataset: MICRONS
+    task: sft
+    native_resolution: [40, 8, 8]
+    imaging: ssTEM
+    label_convention: filled
+  # CREMI C labeled test (sft instance metrics).
+  - vol: cremi3d_sample_C_volume
+    seg: cremi3d_sample_C_segmentation
+    root: ${cremi3d_root}
+    dataset: CREMI3D_C
+    task: sft
+    native_resolution: [40, 4, 4]
+    imaging: ssTEM
+    label_convention: filled
+  # CREMI C+ padded: image-only test (ssl reconstruction).
+  - vol: cremi3d_sample_C+_padded_volume
+    root: ${cremi3d_root}
+    dataset: CREMI3D
+    task: ssl
+    native_resolution: [40, 4, 4]
+    imaging: ssTEM
+
+model:
+  type: joint3d_voxeldit       # JointVoxelDiT3DModule (VoxelDiT2-3D)
+  variant: H/16                # hidden 1280, 32 blocks, 16^3 voxel patches
+  in_channels: 1
+  head_channels: 20            # len(loss.seg.offsets)=18 + sem + raw
+  feature_size: 64
+  # Text condition: the batch prompt ("{imaging} · {tail}", tail = filled /
+  # gapped / ssl) goes through this frozen T5 encoder into a zero-initialised
+  # projection added to the DiT class condition.  Weights download from the
+  # Hugging Face Hub on first use and are cached in text_cache_dir.  Pooled
+  # features are cached per prompt (memory, then <cache>/features/), so T5
+  # runs once per prompt string, not per step or per restart.
+  text_encoder: google-t5/t5-small
+  text_cache_dir: ${oc.env:HOME}/.cache/ncntm/t5
+  pixel_channels: 16           # unpatchified DiT features fed to the head
+  dropout: 0.5
+  # Inflate the released 2-D nvidia/PixelDiT2-ImageNet H/16 (256 px) weights
+  # to 3-D; false trains the same geometry from random init.
+  pretrained: true
+  dtype: bf16                  # paired with training.precision bf16-true
+  # Only the DINOv3 grounding encoder is frozen; the DiT, its grounding
+  # projector and the task head train.
+  freeze_dit_backbone: false
+  # Tri-planar grounding: DINOv3 ViT-S/16 on every 4th section along z, y
+  # and x, averaged onto the 16^3 token grid.
+  grounding_encoder: dinov3_vits16
+  grounding_axes: [z, y, x]
+  grounding_slice_stride: 4
+  gradient_checkpointing: false
+  # The task forward reads the DiT at the degraded endpoint of the flow.
+  feature_timestep: 1.0
+
+optimizer:
+  lr: 6.0e-5
+  weight_decay: 0.0001
+  betas: [0.9, 0.99]
+  master_dtype: fp32
+  scheduler:
+    type: cosine_warmup
+    T_max: 101
+    eta_min: 6.0e-6
+    warmup_epochs: 1
+  dit_backbone_lr: 6.0e-5
+
+# Joint3DReconSegLoss.  Same weights as cpt_snemi3d.yaml except the affinity:
+# weight_seg is 1, so the 18-offset affinity and the foreground head run on
+# sft batches, and weight_sft is 5 to match weight_ssl (0 would zero that
+# branch, affinity included).  weight_dif is the rectified-flow weight that
+# trains the DiT for the pred/Euler path, so it stays on.  The flow term is
+# only applied to samples whose native grid is the 4 nm cube, so on 30x6x6 nm
+# data it is skipped until such data is added.
+loss:
+  type: joint3d
+  recon_loss: l1
+  weight_rec: 1.0
+  weight_dif: 1.0
+  diffusion_steps: 35
+  weight_seg: 1.0
+  weight_ssl: 5.0
+  weight_sft: 5.0
+  # Residual next-scale reconstruction, coarse to fine; a scale is scored
+  # only when the crop was measured at least that finely.
+  var:
+    enabled: true
+    fine_nm: 4
+    scales_nm: [32, 16, 8, 4]
+  # Isotropic affinity (Mutex Watershed): the same strides 1, 2, 3, 4, 5 and 8
+  # along z, y and x, so the offset set is unchanged under the z/y/x
+  # permutation.  The first n_pull offsets are the nearest-neighbour "pull"
+  # (merge) edges, one per axis; the other 15 are "push" (separate) edges.
+  # The head is pooled to the label grid before the loss, so strides are
+  # counted in native label voxels.
+  seg:
+    ignore_index: -100
+    background: -1
+    n_pull: 3
+    offsets:
+    - [-1, 0, 0]
+    - [0, -1, 0]
+    - [0, 0, -1]
+    - [-2, 0, 0]
+    - [-3, 0, 0]
+    - [-4, 0, 0]
+    - [-5, 0, 0]
+    - [-8, 0, 0]
+    - [0, -2, 0]
+    - [0, -3, 0]
+    - [0, -4, 0]
+    - [0, -5, 0]
+    - [0, -8, 0]
+    - [0, 0, -2]
+    - [0, 0, -3]
+    - [0, 0, -4]
+    - [0, 0, -5]
+    - [0, 0, -8]
+    weight_aff:
+      weight: 1.0
+      lambda_bce: 1.0
+      lambda_dice: 1.0
+      lambda_focal: 1.0
+      gamma: 3.0
+      pull_weight: 1.0
+      push_weight: 3.0
+      mask_to_foreground: true
+      class_balance: auto
+      class_balance_clip: 10.0
+      dice_two_sided: true
+    weight_sem:
+      weight: 1.0
+      lambda_bce: 1.0
+      lambda_dice: 1.0
+      lambda_focal: 1.0
+      gamma: 3.0
+      class_balance: auto
+      class_balance_clip: 10.0
+      dice_two_sided: true
+
+training:
+  # Runs on the labeled val batches: Mutex Watershed on the predicted
+  # affinities, scored against the AC3 instances (ARI, AMI, VOI, TED).
+  mutex_watershed:
+    strides: [1, 1, 1]
+    size_filter: 50
+    backend: auto
+    buckets: 16
+    max_push_edges: null
+    gate_with_sem: true
+    sem_gate_threshold: 0.5
+    grow_boundaries: false
+    grow_max_distance: 0.0
+  max_epochs: 101
+  accelerator: auto
+  devices: auto
+  strategy: ddp
+  use_distributed_sampler: false
+  precision: bf16-true
+  gradient_clip_val: 1.0
+  accumulate_grad_batches: 1
+  val_check_interval: 1.0
+  limit_train_batches: 500
+  # 32 val batches (see val_num_samples); 40 covers the per-rank shard.
+  limit_val_batches: 40
+  check_val_every_n_epoch: 10
+  num_sanity_val_steps: 2
+  log_every_n_steps: 100
+  log_recon_steps: false
+  enable_progress_bar: true
+  enable_model_summary: true
+  deterministic: false
+  benchmark: true
+  fast_dev_run: false
+  resume_from_checkpoint: null
+
+callbacks:
+  checkpoint:
+    enabled: true
+    dirpath: null
+    filename: '{epoch:02d}-{val/automatic/loss:.4f}'
+    save_top_k: 3
+    monitor: val/automatic/loss
+    mode: min
+    save_last: true
+    verbose: true
+  # Trainable weights only, ~2 GB each in bf16; save_top_k -1 keeps all.
+  weights_checkpoint:
+    enabled: true
+    every_n_epochs: 20
+    save_top_k: -1
+  lr_monitor:
+    enabled: true
+  image_logger:
+    enabled: true
+    every_n_epochs: 1
+    max_images: 8
+  cuda_empty_cache_before_val: true
+  memory_logger:
+    enabled: true
+    log_every_n_steps: null
+
+output_dir: ${oc.env:HOME}/outputs/ncntm
+
+hydra:
+  job:
+    chdir: false

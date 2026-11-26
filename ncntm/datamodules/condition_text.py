@@ -6,7 +6,7 @@ Template::
 
 where ``tail`` is ``ssl`` on the SSL branch and ``gapped`` / ``filled``
 (``label_convention``) on SFT.  The prompt is logged to TensorBoard for
-debugging; the network is not conditioned on it (null text).
+debugging and fed to the network as text condition (frozen T5 encoder).
 """
 
 from __future__ import annotations
