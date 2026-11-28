@@ -3,6 +3,7 @@ Connectomics segmentation metrics.
 
 Instance metrics (from ``metrics.instance``):
     compute_per_point_ari, compute_per_batch_ari,
+    compute_large_object_recall,
     compute_per_point_ami, compute_per_batch_ami,
     compute_per_point_voi, compute_per_batch_voi, VOIResult,
     compute_per_point_ted, compute_per_batch_ted
@@ -14,6 +15,7 @@ Semantic metrics (from ``metrics.semantic``):
 
 from ncntm.metrics.instance import (
     VOIResult,
+    compute_large_object_recall,
     compute_per_batch_ami,
     compute_per_batch_ari,
     compute_per_batch_ted,
@@ -34,6 +36,7 @@ __all__ = [
     # Instance
     "compute_per_point_ari",
     "compute_per_batch_ari",
+    "compute_large_object_recall",
     "compute_per_point_ami",
     "compute_per_batch_ami",
     "compute_per_point_voi",

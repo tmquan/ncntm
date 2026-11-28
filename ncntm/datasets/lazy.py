@@ -279,6 +279,18 @@ class LazyVolDataset(Dataset):
             a labeled crop.  0 disables the gate.
         max_inst_frac: Maximum fraction of the labeled foreground that the
             single largest instance may occupy.  0 disables the gate.
+        large_object_prob: Per-sample probability (non-deterministic /
+            training groups only) of drawing a *large-object* crop: one whose
+            single largest instance covers at least ``large_object_min_frac``
+            of the labeled foreground.  Such crops are rare under uniform
+            random cropping, yet they are exactly the cases (a trunk or soma
+            filling the field of view) the model must segment as one piece.
+            Implemented as rejection sampling on top of the other gates, so
+            the draw stays unbiased within the large-object subset.  0
+            disables it.  Incompatible with ``max_inst_frac`` below
+            ``large_object_min_frac`` (the two gates would never agree).
+        large_object_min_frac: Largest-instance fraction a large-object crop
+            must reach (see ``large_object_prob``).
         max_foreground_retries: Maximum re-sampling attempts before
             falling back to the best-seen crop (highest gate score across
             the attempts).
@@ -304,6 +316,8 @@ class LazyVolDataset(Dataset):
         image_min_autocorr: float = 0.0,
         min_instances: int = 0,
         max_inst_frac: float = 0.0,
+        large_object_prob: float = 0.0,
+        large_object_min_frac: float = 0.5,
         max_foreground_retries: int = 50,
         volume_sampling: str = "voxels",
         quiet: bool = False,
@@ -342,6 +356,24 @@ class LazyVolDataset(Dataset):
         #                     (0 = disabled).
         self.min_instances = int(min_instances)
         self.max_inst_frac = float(max_inst_frac)
+        self.large_object_prob = float(large_object_prob)
+        self.large_object_min_frac = float(large_object_min_frac)
+        if not 0.0 <= self.large_object_prob <= 1.0:
+            raise ValueError(
+                f"large_object_prob must be in [0, 1]; got {large_object_prob!r}."
+            )
+        if self.large_object_prob > 0:
+            if not 0.0 < self.large_object_min_frac <= 1.0:
+                raise ValueError(
+                    "large_object_min_frac must be in (0, 1]; "
+                    f"got {large_object_min_frac!r}."
+                )
+            if 0 < self.max_inst_frac < self.large_object_min_frac:
+                raise ValueError(
+                    f"max_inst_frac={self.max_inst_frac} rejects every crop the "
+                    f"large-object sampler asks for (min frac "
+                    f"{self.large_object_min_frac}); disable one of them."
+                )
         self.max_foreground_retries = int(max_foreground_retries)
         if volume_sampling not in ("voxels", "uniform"):
             raise ValueError(
@@ -640,6 +672,7 @@ class LazyVolDataset(Dataset):
 
     def _check_foreground(
         self, handle: _VolumeHandle, crop_slices: Tuple[slice, ...],
+        min_largest_frac: float = 0.0,
     ) -> Tuple[bool, Optional[np.ndarray], Optional[np.ndarray], float]:
         """Check whether a crop has enough foreground.
 
@@ -665,10 +698,18 @@ class LazyVolDataset(Dataset):
         fraction, block-content fraction, autocorrelation, or instance
         score).  The best-seen fallback keeps the highest score.
         When no gate is active ``frac`` is ``1.0`` and no extra I/O is done.
+
+        ``min_largest_frac`` > 0 (labeled volumes) additionally requires the
+        single largest instance to cover at least that fraction of the labeled
+        foreground (the large-object draw of ``large_object_prob``); its score
+        is ``largest_frac / min_largest_frac``.  In that mode the image is only
+        read once every label gate has passed, since most proposals fail on
+        the label alone.
         """
         if handle.label_path is not None:
             if (self.min_foreground <= 0 and self.image_min_foreground <= 0
-                    and self.min_instances <= 0 and self.max_inst_frac <= 0):
+                    and self.min_instances <= 0 and self.max_inst_frac <= 0
+                    and min_largest_frac <= 0):
                 return True, None, None, 1.0
             label = None
             image = None
@@ -676,20 +717,15 @@ class LazyVolDataset(Dataset):
             image_frac = 1.0
             inst_score = 1.0
             need_label = (self.min_foreground > 0 or self.min_instances > 0
-                          or self.max_inst_frac > 0)
+                          or self.max_inst_frac > 0 or min_largest_frac > 0)
             if need_label:
                 label = _read_patch(
                     handle.label_path, crop_slices, handle.label_key, dtype=np.int64,
                 )
                 if self.min_foreground > 0:
                     label_frac = float(np.count_nonzero(label)) / label.size
-            if self.image_min_foreground > 0:
-                image = _read_patch(
-                    handle.image_path, crop_slices, handle.image_key, dtype=np.float32,
-                )
-                image_frac = float(np.count_nonzero(image)) / image.size
             inst_ok = True
-            if self.min_instances > 0 or self.max_inst_frac > 0:
+            if self.min_instances > 0 or self.max_inst_frac > 0 or min_largest_frac > 0:
                 ids, counts = np.unique(label, return_counts=True)
                 fg_counts = counts[ids != 0]
                 n_inst = int(fg_counts.size)
@@ -700,9 +736,20 @@ class LazyVolDataset(Dataset):
                 if self.max_inst_frac > 0:
                     inst_ok = inst_ok and max_frac <= self.max_inst_frac
                     inst_score = min(inst_score, (1.0 - max_frac) / max(1.0 - self.max_inst_frac, 1e-6))
-            ok = (label_frac >= self.min_foreground
-                  and image_frac >= self.image_min_foreground
-                  and inst_ok)
+                if min_largest_frac > 0:
+                    inst_ok = inst_ok and max_frac >= min_largest_frac
+                    inst_score = min(inst_score, max_frac / min_largest_frac)
+            label_ok = label_frac >= self.min_foreground and inst_ok
+            # Large-object proposals mostly fail on the label alone; skip the
+            # image read until the label gates pass (score then comes from the
+            # label gates only, which is all the best-seen ranking needs).
+            skip_image = min_largest_frac > 0 and not label_ok
+            if self.image_min_foreground > 0 and not skip_image:
+                image = _read_patch(
+                    handle.image_path, crop_slices, handle.image_key, dtype=np.float32,
+                )
+                image_frac = float(np.count_nonzero(image)) / image.size
+            ok = (label_ok and image_frac >= self.image_min_foreground)
             frac = min(label_frac, image_frac, inst_score)
             return ok, label, image, frac
 
@@ -761,35 +808,53 @@ class LazyVolDataset(Dataset):
         handle = self._pick_volume(index)
         spatial = self._spatial_shape(handle)
 
-        crop_slices = self._random_patch_slices(spatial, rng)
-        if len(handle.shape) > len(spatial):
-            full_slices = (slice(None),) + crop_slices
-        else:
-            full_slices = crop_slices
+        # Large-object draw (training groups only): with probability
+        # ``large_object_prob`` the crop must also have its largest instance
+        # cover ``large_object_min_frac`` of the labeled foreground.  If the
+        # volume has too few such crops to find one within the retry budget,
+        # fall back to an ordinary gated draw instead of accepting a crop that
+        # fails the gate.
+        want_large = (
+            not self.deterministic
+            and self.large_object_prob > 0
+            and handle.label_path is not None
+            and rng.random_sample() < self.large_object_prob
+        )
+        targets = ([self.large_object_min_frac, 0.0] if want_large else [0.0])
 
         # Re-sample crops until the patch passes every enabled gate
         # (labeled: label foreground, image non-zero, instance diversity;
         # label-less: image non-zero, block-std content, autocorrelation).
-        # Carry the successful
-        # read forward so we don't decode the same chunk again below.  If
-        # every retry fails, fall back to the *best-seen* crop (highest
-        # gate score) and restore its
-        # slices so image/label stay consistent.
+        # Carry the successful read forward so we don't decode the same chunk
+        # again below.  If every retry fails, fall back to the *best-seen*
+        # crop (highest gate score) and restore its slices so image/label stay
+        # consistent.
         cached_label: Optional[np.ndarray] = None
         cached_image: Optional[np.ndarray] = None
-        best: Optional[Tuple[float, Tuple[slice, ...],
-                             Optional[np.ndarray], Optional[np.ndarray]]] = None
-        for _ in range(self.max_foreground_retries):
-            ok, cached_label, cached_image, frac = self._check_foreground(handle, full_slices)
-            if ok:
-                break
-            if best is None or frac > best[0]:
-                best = (frac, full_slices, cached_label, cached_image)
+        full_slices: Tuple[slice, ...] = ()
+        for min_largest_frac in targets:
             crop_slices = self._random_patch_slices(spatial, rng)
             full_slices = ((slice(None),) + crop_slices
-                           if len(handle.shape) > len(spatial)
-                           else crop_slices)
-        else:
+                           if len(handle.shape) > len(spatial) else crop_slices)
+            best: Optional[Tuple[float, Tuple[slice, ...],
+                                 Optional[np.ndarray], Optional[np.ndarray]]] = None
+            accepted = False
+            for _ in range(self.max_foreground_retries):
+                ok, cached_label, cached_image, frac = self._check_foreground(
+                    handle, full_slices, min_largest_frac=min_largest_frac,
+                )
+                if ok:
+                    accepted = True
+                    break
+                if best is None or frac > best[0]:
+                    best = (frac, full_slices, cached_label, cached_image)
+                crop_slices = self._random_patch_slices(spatial, rng)
+                full_slices = ((slice(None),) + crop_slices
+                               if len(handle.shape) > len(spatial) else crop_slices)
+            if accepted:
+                break
+            if min_largest_frac > 0:
+                continue  # large-object draw exhausted: retry with normal gates
             if best is not None:
                 frac, full_slices, cached_label, cached_image = best
                 logger.warning(

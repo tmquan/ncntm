@@ -52,6 +52,7 @@ from ncntm.metrics import (
     compute_per_batch_iou,
     compute_per_batch_voi,
     compute_per_batch_ted,
+    compute_large_object_recall,
 )
 from ncntm.losses import AFFINITY_OFFSETS
 
@@ -143,6 +144,10 @@ class BaseCircuitModule(pl.LightningModule):
 
         self.optimizer_config = dict(optimizer_config or {})
         self.training_config = dict(training_config or {})
+        # Large-object recall threshold (share of the crop's labelled foreground).
+        self.large_object_min_frac = float(
+            self.training_config.get("large_object_min_frac", 0.5)
+        )
         loss_config = dict(loss_config or {})
         model_config = dict(model_config or {})
 
@@ -540,6 +545,17 @@ class BaseCircuitModule(pl.LightningModule):
         self._accum(f"{metric}/voi_split", voi.split, bs)
         self._accum(f"{metric}/voi_merge", voi.merge, bs)
         self._accum(f"{metric}/ted", compute_per_batch_ted(ins_pred, ins_gt), bs)
+        # Large-object recall: does the MWS keep each big GT object as one
+        # segment?  Weighted by object count, so the epoch value is the mean
+        # over large objects (crops with none contribute nothing).
+        rec_sum, iou_sum, n_large = compute_large_object_recall(
+            ins_pred, ins_gt, min_frac=self.large_object_min_frac,
+        )
+        if n_large:
+            self._accum(f"{metric}/large_recall", rec_sum / n_large, n_large)
+            self._accum(f"{metric}/large_iou", iou_sum / n_large, n_large)
+        # Large objects per crop: a sample-size indicator, the mean over crops.
+        self._accum(f"{metric}/large_per_crop", n_large / max(1, ins_gt.shape[0]), bs)
         del ins_pred
 
     def _accumulate_dataset_eval(
@@ -660,6 +676,8 @@ class BaseCircuitModule(pl.LightningModule):
     _INSTANCE_METRIC_KEYS = (
         "ins/metric/ari", "ins/metric/ami", "ins/metric/voi",
         "ins/metric/voi_split", "ins/metric/voi_merge", "ins/metric/ted",
+        "ins/metric/large_recall", "ins/metric/large_iou",
+        "ins/metric/large_per_crop",
     )
 
     def _seed_eval_accum(self, stage: str) -> None:

@@ -1,12 +1,53 @@
 # =====================================================================
-# sft_alldata.yaml  --  VoxelDiT2-3D (H/16, ~1B) joint reconstruction +
+# sft_alldata_r2.yaml  --  VoxelDiT2-3D (H/16, ~1B) joint reconstruction +
 # instance-segmentation fine-tuning on SNEMI3D, CREMI and MICrONS
 # =====================================================================
-# sft_snemi3d.yaml plus CREMI3D and MICrONS.  The optimiser, the schedule
-# and the SNEMI volumes are unchanged.  ``balance: dataset`` gives each
+# Run 2 of sft_alldata.yaml.  Data, volumes, crop gates, degradation and the
+# affinity / sem loss are identical to sft_alldata.yaml, so the two runs are
+# comparable.  Changes (all marked "r2" below), made after run 1 (sft-r1):
+#
+#   * DiT backbone LR halved to 1e-4 (head stays 2e-4).  In run 1 the DiT ran
+#     at 2e-4 and its pre-clip grad norm exceeded gradient_clip_val on ~50 %
+#     of steps (dit/clip_rate) with spikes near 10x the clip.
+#   * 5 warm-up epochs instead of 1, so the randomly initialised head does
+#     not push large updates into the pretrained DiT early on.
+#   * 20 hold epochs instead of 100, then a cosine decay to 5e-6 over a
+#     200-epoch schedule instead of 501.  Run 1's val ARI had stopped
+#     improving by epoch ~30 at constant LR; the decay phase never ran.
+#   * Head dropout 0.5 -> 0.2.
+#   * weight_dif 0.01: the rectified-flow term is back.  In run 1 it never ran
+#     (skipped for every non-4 nm-native sample, so no ``loss/field`` and a
+#     blank ``pred/Euler`` panel); it now pools the velocity onto the native
+#     grid (see the loss block), so the DiT also trains on flow.
+#
+# Do NOT set ``model.freeze_dit_backbone`` to an integer here.  The DiT is
+# frozen when DDP wraps the model, so its parameters are left out of the
+# gradient all-reduce, and after the thaw each rank trains its own DiT
+# (checked on a 2-rank gloo DDP toy model: weights differ across ranks).
+#
+# Watch the DiT in TensorBoard: train/automatic/dit/{clip_rate,grad_norm,
+# update_ratio}.  A well-trained DiT shows clip_rate falling well below the
+# ~0.5 of run 1 once warm-up ends, a steady grad_norm near or under the clip,
+# and a non-zero update_ratio throughout (the DiT is actually moving).
+#
+# Start (fresh, from the inflated 2-D PixelDiT2 weights; stop sft-r1 first,
+# both runs need all 8 GPUs):
+#
+#   python scripts/train.py --config-name sft_alldata_r2 \
+#     experiment_name=sft-r2 optimizer.master_dtype=fp32
+#
+# Warm start from run 1 instead (weights only, ~2 GB; skips re-learning the
+# first ~100 epochs, and the head loads too):
+#
+#   python scripts/train.py --config-name sft_alldata_r2 experiment_name=sft-r2 \
+#     optimizer.master_dtype=fp32 \
+#     ckpt_path=<run dir>/checkpoints/weights-epoch099.pt \
+#     ckpt_path_skip_prefixes=null
+#
+# sft_snemi3d.yaml plus CREMI3D and MICrONS.  ``balance: dataset`` gives each
 # dataset name an equal share of its branch.
 #
-#   sft  SNEMI3D AC4 and the Kasthuri cylinder (gapped, 30x6x6), CREMI
+#   sft  SNEMI3D AC4 (filled, 30x6x6), the Kasthuri cylinder (gapped), CREMI
 #        A and B (filled, 40x4x4) and 10 MICrONS crops (filled, 40x8x8).
 #        find_boundaries erodes the sem target on filled volumes only.
 #   ssl  the two raw Kasthuri volumes, plus the CREMI A+ and B+ padded
@@ -31,7 +72,7 @@
 # ~/.cache/ncntm/pixeldit2); timm caches DINOv3 in the HuggingFace cache.
 # =====================================================================
 
-experiment_name: ncntm-voxeldit2-h16-sft-alldata
+experiment_name: ncntm-voxeldit2-h16-sft-alldata-r2
 project_name: ncntm
 seed: 42
 ckpt_path: null
@@ -65,6 +106,13 @@ data:
   # distinct instances that the affinity loss sees push (separate) pairs.
   sft_min_foreground: 0.8
   sft_min_instances: 5
+  # Large-object oversampling (train only; validation stays unbiased).  With
+  # probability sft_large_object_prob a training crop is drawn so its largest
+  # instance covers >= sft_large_object_min_frac of the labelled foreground.
+  # Uniform crops reach that for ~10 % of draws (AC3 ~0 % at 0.8).  Keep
+  # sft_max_inst_frac off: it would reject exactly these crops.
+  sft_large_object_prob: 0.25
+  sft_large_object_min_frac: 0.5
   # Erodes the sem target on filled volumes (CREMI, MICrONS).  Gapped
   # volumes (SNEMI, Kasthuri) already have membrane gaps and skip it.
   find_boundaries: 1.0
@@ -107,7 +155,7 @@ data:
         dataset: SNEMI3D
         native_resolution: [30, 6, 6]
         imaging: ssSEM
-        label_convention: gapped
+        label_convention: filled
       # Kasthuri cylinder (cc image + neurons segmentation).
       - vol: neurons_cc_5000x2900x300_x3000_y7200_z950_volume
         seg: neurons_5000x2900x300_x3000_y7200_z950_segmentation
@@ -252,7 +300,7 @@ data:
     task: sft
     native_resolution: [30, 6, 6]
     imaging: ssSEM
-    label_convention: gapped
+    label_convention: filled
   # Uncorrected-contrast copies of the same tissue: tracks robustness to the
   # per-slice brightness swings the cc training data does not have.
   - vol: AC3_em_inputs
@@ -262,7 +310,7 @@ data:
     task: sft
     native_resolution: [30, 6, 6]
     imaging: ssSEM
-    label_convention: gapped
+    label_convention: filled
 
   # MICrONS labeled test (2 of 12 crops).
   - vol: minnie65_mip0_4096x4096x800_x105000_y80000_z16500_volume
@@ -313,13 +361,17 @@ model:
   text_encoder: google-t5/t5-small
   text_cache_dir: ${oc.env:HOME}/.cache/ncntm/t5
   pixel_channels: 16           # unpatchified DiT features fed to the head
-  dropout: 0.5
+  # r2: 0.5 -> 0.2.  Channel dropout before the task head's last 1x1 conv
+  # (the DiT has its own, ``dit_dropout``, left at 0).
+  dropout: 0.2
   # Inflate the released 2-D nvidia/PixelDiT2-ImageNet H/16 (256 px) weights
   # to 3-D; false trains the same geometry from random init.
   pretrained: true
   dtype: bf16                  # paired with training.precision bf16-true
   # Only the DINOv3 grounding encoder is frozen; the DiT, its grounding
-  # projector and the task head train.
+  # projector and the task head train from step 0.  Keep this ``false``: an
+  # integer warm-up leaves the DiT out of the DDP gradient all-reduce (see the
+  # header).  The LR warm-up below protects the pretrained DiT instead.
   freeze_dit_backbone: false
   # Tri-planar grounding: DINOv3 ViT-S/16 on every 4th section along z, y
   # and x, averaged onto the 16^3 token grid.
@@ -331,33 +383,54 @@ model:
   feature_timestep: 1.0
 
 optimizer:
+  # r2: ``lr`` is the task head and the grounding projector; the DiT backbone
+  # has its own LR below.
   lr: 2.0e-4
   weight_decay: 0.0001
   betas: [0.9, 0.99]
   master_dtype: fp32
-  # Epoch 0 is the warm-up (1 % of ``lr``).  Epochs 1-101 run at ``lr``:
-  # 100 hold epochs plus the first cosine epoch, which is still at ``lr``.
-  # Epochs 102-500 decay along the cosine and end just above ``eta_min``.
+  # r2.  Epochs 0-4 ramp linearly from 1 % of each group's LR to its full LR.
+  # Epochs 5-25 run at full LR (20 hold epochs plus the first cosine epoch,
+  # which is still at full LR).  Epochs 26-199 decay along the cosine to just
+  # above ``eta_min``.  ``eta_min`` is one absolute value for every group:
+  # 5e-6 is 40x below the head LR and 20x below the DiT LR.
   scheduler:
     type: cosine_warmup
-    T_max: 501
-    eta_min: 2.0e-5
-    warmup_epochs: 1
-    hold_epochs: 100
-  dit_backbone_lr: 2.0e-4
+    T_max: 201
+    eta_min: 5.0e-6
+    warmup_epochs: 5
+    hold_epochs: 20
+  # r2: 2e-4 -> 1e-4 (run 1: clip_rate ~0.5, grad-norm spikes).  The DiT is
+  # pretrained, the head is new, so it takes the smaller step.  Do not go much
+  # below ~5e-5: the DiT would barely move off the ImageNet weights.
+  dit_backbone_lr: 1.0e-4
 
 # Joint3DReconSegLoss.  Same weights as cpt_snemi3d.yaml except the affinity:
 # weight_seg is 1, so the 18-offset affinity and the foreground head run on
 # sft batches, and weight_sft is 5 to match weight_ssl (0 would zero that
-# branch, affinity included).  weight_dif is the rectified-flow weight that
-# trains the DiT for the pred/Euler path, so it stays on.  The flow term is
-# only applied to samples whose native grid is the 4 nm cube, so on 30x6x6 nm
-# data it is skipped until such data is added.
+# branch, affinity included).  weight_dif is the rectified-flow weight: a
+# second DiT forward per step trains the velocity (``loss/field``) that the
+# pred/Euler panel integrates (diffusion_steps Euler steps, then the task
+# head).  Every crop in this config is 30x6x6, 40x4x4 or 40x8x8 nm native, so
+# the clean target is a nearest repeat (slabs).  The flow loss therefore pools
+# the predicted and target velocity onto each sample's native grid before the
+# MSE, as the recon L1 does (rectified_flow_loss / _combine_field).  Before
+# that change the term was skipped for every sample here (run 1 had no
+# ``loss/field`` scalar and a blank pred/Euler panel); r2 had it at 0.
+# Weight: 0.01, measured on 30-step smoke runs (8 GPUs).  The velocity loss
+# divides the x-prediction error by t (clamped at 0.05), so its DiT gradient
+# is large next to the affinity/sem/recon terms, and gradient_clip_val clips
+# the global norm.  Pre-clip DiT grad norm / clip rate over the first 30
+# steps: weight_dif 0 -> 0.2-0.6 / 0.0; 0.01 -> 0.4-5.7 / 0.2-0.8; 0.05 -> 1-25
+# / 0.8-1.0; 1.0 -> 23-545 / 1.0 (every step clipped, the head's gradient
+# scaled down 25-500x).  Watch train/automatic/dit/clip_rate and loss/field;
+# raise the weight only if clip_rate stays well below ~0.5 once warm-up ends.
+# Cost: one extra DiT forward+backward per step (about 2.1 s vs 1.6 s).
 loss:
   type: joint3d
   recon_loss: l1
   weight_rec: 1.0
-  weight_dif: 1.0
+  weight_dif: 0.01
   diffusion_steps: 35
   weight_seg: 1.0
   weight_ssl: 5.0
@@ -420,6 +493,10 @@ loss:
       dice_two_sided: true
 
 training:
+  # Large-object recall (val metric ins/metric/large_recall): a GT object
+  # counts as large when it covers >= this share of the crop's labelled
+  # foreground.  Match data.sft_large_object_min_frac.
+  large_object_min_frac: 0.5
   # Runs on the labeled val batches: Mutex Watershed on the predicted
   # affinities, scored against the AC3 instances (ARI, AMI, VOI, TED).
   mutex_watershed:
@@ -432,7 +509,8 @@ training:
     sem_gate_threshold: 0.5
     grow_boundaries: false
     grow_max_distance: 0.0
-  max_epochs: 501
+  # r2: 201 epochs, equal to optimizer.scheduler.T_max.  Keep the two in step.
+  max_epochs: 201
   accelerator: auto
   devices: auto
   strategy: ddp

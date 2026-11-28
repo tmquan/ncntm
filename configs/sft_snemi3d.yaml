@@ -146,7 +146,7 @@ data:
     task: sft
     native_resolution: [30, 6, 6]
     imaging: ssSEM
-    label_convention: gapped
+    label_convention: filled
   - vol: AC4_cc_inputs
     root: ${snemi3d_root}
     dataset: AC4_cc
@@ -162,7 +162,7 @@ data:
     task: sft
     native_resolution: [30, 6, 6]
     imaging: ssSEM
-    label_convention: gapped
+    label_convention: filled
   - vol: AC4_em_inputs
     root: ${snemi3d_root}
     dataset: AC4_em

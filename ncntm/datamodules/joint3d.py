@@ -343,6 +343,8 @@ class Joint3DDataModule(pl.LightningDataModule):
         sft_min_foreground: float = 0.0,
         sft_min_instances: int = 0,
         sft_max_inst_frac: float = 0.0,
+        sft_large_object_prob: float = 0.0,
+        sft_large_object_min_frac: float = 0.5,
         ssl_min_foreground: float = 0.0,
         ssl_min_std: float = 0.0,
         ssl_min_autocorr: float = 0.0,
@@ -401,6 +403,15 @@ class Joint3DDataModule(pl.LightningDataModule):
         # of the labeled foreground.  Both 0 = disabled (default).
         self.sft_min_instances = int(sft_min_instances)
         self.sft_max_inst_frac = float(sft_max_inst_frac)
+        # Large-object oversampling (sft train groups only; validation stays
+        # deterministic and unbiased): with probability ``sft_large_object_prob``
+        # a crop is drawn so its largest instance covers at least
+        # ``sft_large_object_min_frac`` of the labeled foreground.  Uniform
+        # random crops rarely look like that (~10% reach 0.5, ~0% reach 0.8),
+        # yet single large objects are what the sem gate and mutex watershed
+        # tend to miss.  Keep ``sft_max_inst_frac`` off when enabling it.
+        self.sft_large_object_prob = float(sft_large_object_prob)
+        self.sft_large_object_min_frac = float(sft_large_object_min_frac)
         # Image-nonzero gate for the label-less ssl branch: rejects mostly-empty /
         # zero-padded crops (e.g. MitoEM2 nnU-Net irregular crops padded to a box,
         # empty COSEM/FLYEM regions) that would otherwise show as black panels.
@@ -645,6 +656,10 @@ class Joint3DDataModule(pl.LightningDataModule):
             # Instance-diversity gates only for the sft branch (labeled).
             min_instances=(self.sft_min_instances if task == "sft" else 0),
             max_inst_frac=(self.sft_max_inst_frac if task == "sft" else 0.0),
+            large_object_prob=(
+                self.sft_large_object_prob if task == "sft" else 0.0
+            ),
+            large_object_min_frac=self.sft_large_object_min_frac,
             deterministic=deterministic,
             volume_sampling=volume_sampling,
             quiet=quiet,

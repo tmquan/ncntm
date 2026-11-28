@@ -6,6 +6,7 @@ Provides per-point and per-batch variants of:
 - AMI  (Adjusted Mutual Information)
 - VOI  (Variation of Information, with split/merge decomposition)
 - TED  (Tolerant Edit Distance -- min split+merge corrections)
+- large-object recall / IoU (best-match, large GT objects only)
 """
 
 from typing import NamedTuple, Tuple
@@ -98,6 +99,59 @@ def compute_per_batch_ari(
         total += compute_per_point_ari(pred_labels[b], true_labels[b], ignore_background)
         count += 1
     return total / count if count > 0 else 0.0
+
+
+# ======================================================================
+# Large-object recall
+# ======================================================================
+
+def compute_large_object_recall(
+    pred_labels: torch.Tensor,
+    true_labels: torch.Tensor,
+    min_frac: float = 0.5,
+) -> Tuple[float, float, int]:
+    """Recall / IoU of the best-matching predicted segment for large GT objects.
+
+    A GT object is *large* when its voxels are at least ``min_frac`` of the
+    labelled foreground of its crop -- the same definition the sampler's
+    large-object draw uses (``LazyVolDataset.large_object_min_frac``).  For each
+    large object we take the predicted segment that overlaps it most and report
+    ``recall = |g & p| / |g|`` and ``IoU = |g & p| / |g | p|``.  Recall says
+    whether the object is kept as one piece; IoU also penalises merging it with
+    neighbours.  Background (0) is never matched.
+
+    Args:
+        pred_labels: Predicted instance labels [B, D, H, W] (MWS, 0 = bg).
+        true_labels: GT instance labels, same shape (0 = bg).
+        min_frac: Largest-object share of the crop foreground to count as large.
+
+    Returns:
+        ``(recall_sum, iou_sum, n_objects)`` pooled over the batch, so the caller
+        can weight the epoch mean by the number of objects.  ``n_objects`` is 0
+        when no crop has a large object.
+    """
+    rec_sum, iou_sum, n_obj = 0.0, 0.0, 0
+    for b in range(pred_labels.shape[0]):
+        gt = true_labels[b].cpu().numpy().ravel()
+        pr = pred_labels[b].cpu().numpy().ravel()
+        ids, counts = np.unique(gt[gt > 0], return_counts=True)
+        if ids.size == 0:
+            continue
+        large = ids[counts >= min_frac * counts.sum()]
+        for g, g_size in zip(large, counts[counts >= min_frac * counts.sum()]):
+            p_vals = pr[gt == g]
+            p_ids, p_cnt = np.unique(p_vals[p_vals > 0], return_counts=True)
+            rec, iou = 0.0, 0.0
+            if p_ids.size:
+                j = int(np.argmax(p_cnt))
+                inter = float(p_cnt[j])
+                p_size = float(np.count_nonzero(pr == p_ids[j]))
+                rec = inter / float(g_size)
+                iou = inter / (float(g_size) + p_size - inter)
+            rec_sum += rec
+            iou_sum += iou
+            n_obj += 1
+    return rec_sum, iou_sum, n_obj
 
 
 # ======================================================================

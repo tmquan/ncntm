@@ -42,6 +42,7 @@ from einops import rearrange
 
 from ncntm.losses import HEAD_CHANNELS
 from ncntm.losses.field import euler_integrate, interpolate_rectified_flow
+from ncntm.utils.nearest import nearest_mean_pool
 from ncntm.models.common import (
     FeatureProjector3D,
     PointwiseLinear,
@@ -422,13 +423,26 @@ class VoxelDiT2Wrapper3D(nn.Module):
         ).to(dtype=degraded.dtype)
 
     def rectified_flow_loss(
-        self, degraded: torch.Tensor, clean: torch.Tensor, prompts: Any = None,
+        self,
+        degraded: torch.Tensor,
+        clean: torch.Tensor,
+        prompts: Any = None,
+        native_size: Any = None,
     ) -> torch.Tensor:
         """Velocity MSE on the straight path from the clean volume (``t = 0``) to the degraded one.
 
         Both are dataset-range ``[0, 1]`` volumes; a coarser clean target is
         trilinearly resampled onto the degraded grid. ``t`` is uniform in
         ``flow_t_range``, one draw per sample.
+
+        ``native_size`` (``[3]`` or ``[B, 3]``) is the spatial size of the clean
+        target before it was nearest-repeated onto the 4 nm grid.  When it is
+        coarser than the grid, the clean volume is slabs, and a per-voxel
+        velocity toward slabs would teach the DiT blocky output.  The
+        predicted and the target velocity are then both mean-pooled onto the
+        native grid (the windows the nearest repeat filled) before the MSE, the
+        same way the reconstruction L1 scores the head: nothing is asked of
+        the voxels inside one native voxel.
         """
         with torch.autocast(device_type=degraded.device.type, enabled=False):
             degraded = self._as_volume(degraded)
@@ -438,8 +452,23 @@ class VoxelDiT2Wrapper3D(nn.Module):
             lo, hi = self._flow_t_range
             t = torch.empty(x0.shape[0], device=x0.device).uniform_(lo, hi)
             x_t, velocity = interpolate_rectified_flow(x0, x1, t)
-            pred = self.predict_velocity(x_t, t, prompts)
-            return F.mse_loss(self._crop(pred, spatial), self._crop(velocity, spatial))
+            pred = self._crop(self.predict_velocity(x_t, t, prompts), spatial)
+            velocity = self._crop(velocity, spatial)
+            if native_size is None:
+                return F.mse_loss(pred, velocity)
+            native = torch.as_tensor(native_size)
+            if native.dim() == 1:
+                native = native.unsqueeze(0).expand(pred.shape[0], -1)
+            fine = tuple(int(v) for v in pred.shape[-3:])
+            losses = []
+            for i in range(pred.shape[0]):
+                nat = tuple(int(v) for v in native[i].tolist())
+                p_i, v_i = pred[i:i + 1], velocity[i:i + 1]
+                if nat != fine:
+                    p_i = nearest_mean_pool(p_i, nat)
+                    v_i = nearest_mean_pool(v_i, nat)
+                losses.append(F.mse_loss(p_i, v_i))
+            return torch.stack(losses).mean()
 
     @torch.no_grad()
     def few_step_reconstruct(
